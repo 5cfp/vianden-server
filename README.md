@@ -39,6 +39,19 @@ One Go binary + PostgreSQL.
 go test ./...
 ```
 
+## Database code (sqlc)
+SQL queries live in `internal/db/queries/*.sql`. [sqlc](https://sqlc.dev) turns them into Go functions (files named `sqlc_*.go` and `*.sql.go` in `internal/db/`; never edit those by hand).
+
+After changing a query or adding a migration, regenerate (needs Docker, run in this folder):
+```powershell
+docker run --rm -v "${PWD}:/src" -w /src sqlc/sqlc:1.31.1 generate
+```
+Commit the generated files together with the SQL change.
+
+## Migrations
+Migrations live in `internal/db/migrations/` as numbered goose files (`00001_init.sql`, `00002_...sql`). They are built into the binary and applied automatically at startup.
+**Never edit a migration that is already committed**; add a new one instead.
+
 ## Project layout
 | Folder | What it contains |
 |---|---|
@@ -47,6 +60,7 @@ go test ./...
 | `internal/config/` | Loads settings from environment variables / `.env` |
 | `internal/db/` | PostgreSQL connection + migration runner |
 | `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |
+| `internal/db/queries/` | SQL queries; sqlc generates Go code from them |
 | `internal/supervisor/` | Restarts a service if it crashes |
 | `internal/buildinfo/` | Server and protocol version numbers |
 | `docs/API.md` | Full API documentation for client developers |

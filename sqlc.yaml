@@ -1,0 +1,15 @@
+# sqlc turns the SQL in internal/db/queries/ into type-safe Go code in internal/db/.
+# Regenerate after changing a query or adding a migration (see README, "Database code").
+version: "2"
+sql:
+  - engine: postgresql
+    schema: internal/db/migrations # sqlc reads the goose migrations to learn the tables
+    queries: internal/db/queries
+    gen:
+      go:
+        package: db
+        out: internal/db
+        sql_package: pgx/v5
+        # Rename the generated db/models files so they never clash with our own db.go.
+        output_db_file_name: sqlc_db.go
+        output_models_file_name: sqlc_models.go
