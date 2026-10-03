@@ -1,0 +1,19 @@
+# Secrets and local config: NEVER commit these (use .env.example instead)
+.env
+*.env
+!.env.example
+
+# Build output
+/bin/
+*.exe
+vianden-server
+
+# Test and coverage output
+*.test
+*.out
+coverage.*
+
+# Editors / OS
+.idea/
+.DS_Store
+Thumbs.db
