@@ -1,0 +1,30 @@
+# Local development database for vianden-server.
+# Start:  docker compose up -d
+# Stop:   docker compose down        (data is kept in the "pgdata" volume)
+# Reset:  docker compose down -v     (DELETES all local data)
+#
+# Values like ${VIANDEN_DB_PASSWORD} are read from the .env file in this folder.
+
+services:
+  postgres:
+    image: postgres:18-alpine   # PostgreSQL License (permissive)
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${VIANDEN_DB_USER:-vianden}
+      POSTGRES_DB: ${VIANDEN_DB_NAME:-vianden}
+      # No default on purpose: fail loudly if the password is missing from .env.
+      POSTGRES_PASSWORD: ${VIANDEN_DB_PASSWORD:?Set VIANDEN_DB_PASSWORD in .env (copy .env.example)}
+    ports:
+      # Bind to 127.0.0.1 only, so the database is reachable from this PC
+      # but NOT from other devices on your network.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
