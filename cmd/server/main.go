@@ -14,6 +14,7 @@ import (
 	"github.com/5cfp/vianden-server/internal/api"
 	"github.com/5cfp/vianden-server/internal/buildinfo"
 	"github.com/5cfp/vianden-server/internal/config"
+	"github.com/5cfp/vianden-server/internal/db"
 	"github.com/5cfp/vianden-server/internal/supervisor"
 )
 
@@ -39,7 +40,18 @@ func run(logger *slog.Logger) error {
 	logger.Info("starting vianden-server",
 		"version", buildinfo.Version, "protocol_version", buildinfo.ProtocolVersion, "listen", cfg.ListenAddr)
 
-	handler := api.NewHandler(cfg.ServerName, logger)
+	// The database must be reachable and up to date before we accept any requests.
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := db.Migrate(ctx, cfg.DatabaseURL, logger); err != nil {
+		return err
+	}
+
+	handler := api.NewHandler(cfg.ServerName, pool, logger)
 	supervisor.Run(ctx, logger, "http", func(ctx context.Context) error {
 		return serveHTTP(ctx, cfg.ListenAddr, handler)
 	})

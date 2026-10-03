@@ -2,18 +2,26 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"time"
 
 	"github.com/5cfp/vianden-server/internal/buildinfo"
 )
 
+// Pinger is anything that can check the database connection.
+// The real server passes a *pgxpool.Pool; tests pass a fake.
+type Pinger interface {
+	Ping(ctx context.Context) error
+}
+
 // NewHandler returns the HTTP handler for the whole API.
-func NewHandler(serverName string, logger *slog.Logger) http.Handler {
+func NewHandler(serverName string, db Pinger, logger *slog.Logger) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/health", handleHealth)
+	mux.HandleFunc("GET /api/v1/health", handleHealth(db, logger))
 	mux.HandleFunc("GET /api/v1/info", handleInfo(serverName))
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)
@@ -21,8 +29,24 @@ func NewHandler(serverName string, logger *slog.Logger) http.Handler {
 	return recoverPanics(logger, mux)
 }
 
-func handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+type healthResponse struct {
+	Status   string `json:"status"`
+	Database string `json:"database"`
+}
+
+func handleHealth(db Pinger, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+
+		if err := db.Ping(ctx); err != nil {
+			// The reason goes to the log only; clients just learn that the database is down.
+			logger.Error("health check: database unreachable", "error", err)
+			writeJSON(w, http.StatusServiceUnavailable, healthResponse{Status: "unavailable", Database: "unreachable"})
+			return
+		}
+		writeJSON(w, http.StatusOK, healthResponse{Status: "ok", Database: "ok"})
+	}
 }
 
 type infoResponse struct {

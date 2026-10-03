@@ -23,6 +23,8 @@ type Config struct {
 	ServerName string
 	// ListenAddr is the address the HTTP server listens on, e.g. "127.0.0.1:8080".
 	ListenAddr string
+	// DatabaseURL is the PostgreSQL connection string. It contains the DB password: never log it.
+	DatabaseURL string
 }
 
 // Load reads the configuration. A missing .env file is fine; an unreadable one is an error.
@@ -32,10 +34,15 @@ func Load() (Config, error) {
 	}
 
 	cfg := Config{
-		ServerName: getEnv("VIANDEN_SERVER_NAME", "Vianden Server"),
-		ListenAddr: getEnv("VIANDEN_LISTEN_ADDR", "127.0.0.1:8080"),
+		ServerName:  getEnv("VIANDEN_SERVER_NAME", "Vianden Server"),
+		ListenAddr:  getEnv("VIANDEN_LISTEN_ADDR", "127.0.0.1:8080"),
+		DatabaseURL: getEnv("VIANDEN_DATABASE_URL", ""),
 	}
 
+	// No default on purpose: a default would mean a default password.
+	if cfg.DatabaseURL == "" {
+		return Config{}, errors.New("VIANDEN_DATABASE_URL is not set (copy .env.example to .env)")
+	}
 	if len(cfg.ServerName) > MaxServerNameLength {
 		return Config{}, fmt.Errorf("VIANDEN_SERVER_NAME is longer than %d characters", MaxServerNameLength)
 	}

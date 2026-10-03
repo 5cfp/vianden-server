@@ -77,14 +77,27 @@ Every error response (any 4xx or 5xx status) has this body:
 ## 4. REST endpoints
 
 ### `GET /api/v1/health`
-Checks that the server is running.
+Checks that the server is running and can reach its database. Useful for monitoring.
 
 - **Auth:** none
-- **Response `200 OK`:**
+- **Response `200 OK`:** everything works.
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "database": "ok" }
 ```
+
+- **Response `503 Service Unavailable`:** the server is running but its database is not reachable.
+
+```json
+{ "status": "unavailable", "database": "unreachable" }
+```
+
+| Field | Type | Values |
+|---|---|---|
+| `status` | string | `ok`, `unavailable` |
+| `database` | string | `ok`, `unreachable` |
+
+This endpoint does not use the standard error format: both responses have the same shape so monitoring tools can read them the same way.
 
 Example:
 ```
@@ -142,6 +155,6 @@ Rate limits arrive with authentication in M1.
 ## Changelog
 
 ### Protocol version 1 (in development)
-- Added `GET /api/v1/health`.
+- Added `GET /api/v1/health` (reports database status; 503 when the database is unreachable).
 - Added `GET /api/v1/info`.
 - Added the standard error format.

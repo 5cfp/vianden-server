@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +14,13 @@ import (
 )
 
 var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// fakeDB stands in for the real database in tests.
+type fakeDB struct{ err error }
+
+func (f fakeDB) Ping(context.Context) error { return f.err }
+
+var healthyDB = fakeDB{}
 
 // do sends a request to h and returns the recorded response.
 func do(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
@@ -31,18 +40,30 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestHealth(t *testing.T) {
-	rec := do(t, NewHandler("Test", discardLogger), "GET", "/api/v1/health")
+	rec := do(t, NewHandler("Test", healthyDB, discardLogger), "GET", "/api/v1/health")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
-	if got := decode[map[string]string](t, rec)["status"]; got != "ok" {
-		t.Errorf(`status field = %q, want "ok"`, got)
+	if got := decode[healthResponse](t, rec); got != (healthResponse{Status: "ok", Database: "ok"}) {
+		t.Errorf("health = %+v", got)
+	}
+}
+
+func TestHealthDatabaseDown(t *testing.T) {
+	down := fakeDB{err: errors.New("connection refused to 10.0.0.5")}
+	rec := do(t, NewHandler("Test", down, discardLogger), "GET", "/api/v1/health")
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+	if got := decode[healthResponse](t, rec); got != (healthResponse{Status: "unavailable", Database: "unreachable"}) {
+		t.Errorf("health = %+v (internal error details must not leak)", got)
 	}
 }
 
 func TestInfo(t *testing.T) {
-	rec := do(t, NewHandler("My Server", discardLogger), "GET", "/api/v1/info")
+	rec := do(t, NewHandler("My Server", healthyDB, discardLogger), "GET", "/api/v1/info")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -55,7 +76,7 @@ func TestInfo(t *testing.T) {
 }
 
 func TestUnknownRouteReturnsJSON404(t *testing.T) {
-	rec := do(t, NewHandler("Test", discardLogger), "GET", "/api/v1/does-not-exist")
+	rec := do(t, NewHandler("Test", healthyDB, discardLogger), "GET", "/api/v1/does-not-exist")
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

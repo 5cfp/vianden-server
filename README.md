@@ -45,6 +45,8 @@ go test ./...
 | `cmd/server/` | Entry point (`main.go`): loads config, starts services |
 | `internal/api/` | REST API handlers |
 | `internal/config/` | Loads settings from environment variables / `.env` |
+| `internal/db/` | PostgreSQL connection + migration runner |
+| `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |
 | `internal/supervisor/` | Restarts a service if it crashes |
 | `internal/buildinfo/` | Server and protocol version numbers |
 | `docs/API.md` | Full API documentation for client developers |
