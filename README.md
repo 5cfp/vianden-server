@@ -66,6 +66,7 @@ No output from `check` means everything is allowed.
 |---|---|
 | `cmd/server/` | Entry point (`main.go`): loads config, starts services |
 | `internal/api/` | REST API handlers |
+| `internal/auth/` | Password hashing (Argon2id) and secret tokens (sessions, invites) |
 | `internal/config/` | Loads settings from environment variables / `.env` |
 | `internal/db/` | PostgreSQL connection + migration runner |
 | `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |
