@@ -52,6 +52,15 @@ Commit the generated files together with the SQL change.
 Migrations live in `internal/db/migrations/` as numbered goose files (`00001_init.sql`, `00002_...sql`). They are built into the binary and applied automatically at startup.
 **Never edit a migration that is already committed**; add a new one instead.
 
+## License check
+This project only allows permissive dependency licenses. Run this whenever dependencies change (`go.mod`):
+```powershell
+go install github.com/google/go-licenses/v2@latest   # once
+go-licenses check ./... --allowed_licenses=MIT,BSD-2-Clause,BSD-3-Clause,Apache-2.0,ISC,Zlib,Unlicense,PostgreSQL
+go-licenses report ./...                              # list every dependency and its license
+```
+No output from `check` means everything is allowed.
+
 ## Project layout
 | Folder | What it contains |
 |---|---|
