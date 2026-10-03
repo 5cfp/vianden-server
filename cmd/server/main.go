@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/api"
 	"github.com/5cfp/vianden-server/internal/buildinfo"
 	"github.com/5cfp/vianden-server/internal/config"
@@ -59,13 +61,46 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("connected to database", "postgres", pgVersion)
 
-	handler := api.NewHandler(cfg.ServerName, pool, logger)
+	accountService, setupToken, err := accounts.NewService(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if setupToken != "" {
+		printSetupToken(setupToken)
+		logger.Warn("this server has no owner yet: register with the setup token printed above")
+	}
+
+	handler := api.NewHandler(api.Deps{
+		ServerName: cfg.ServerName,
+		DB:         pool,
+		Accounts:   accountService,
+		Logger:     logger,
+	})
 	supervisor.Run(ctx, logger, "http", func(ctx context.Context) error {
 		return serveHTTP(ctx, cfg.ListenAddr, handler)
 	})
 
 	logger.Info("vianden-server stopped")
 	return nil
+}
+
+// printSetupToken shows the one-time owner setup token on the console.
+//
+// This is the ONE place a secret is printed on purpose: the person who starts the server
+// is by definition allowed to become its owner. The token is only usable until an owner
+// exists, and a new one is made on every restart until then. It is printed directly,
+// not through the logger, so it never ends up in structured log files.
+func printSetupToken(token string) {
+	fmt.Println()
+	fmt.Println("==================================================================")
+	fmt.Println("  FIRST-RUN SETUP: this server has no owner yet.")
+	fmt.Println("  Register in the app and enter this as your invite code:")
+	fmt.Println()
+	fmt.Println("    " + token)
+	fmt.Println()
+	fmt.Println("  It works once. Keep it secret: whoever uses it becomes the owner.")
+	fmt.Println("==================================================================")
+	fmt.Println()
 }
 
 // serveHTTP runs the HTTP server until ctx is cancelled, then shuts it down gracefully

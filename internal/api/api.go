@@ -4,11 +4,15 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
 	"time"
 
+	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/buildinfo"
 )
 
@@ -18,15 +22,30 @@ type Pinger interface {
 	Ping(ctx context.Context) error
 }
 
+// Accounts is the account logic the API needs.
+// The real server passes an *accounts.Service; tests pass a fake.
+type Accounts interface {
+	Register(ctx context.Context, in accounts.RegisterInput) (accounts.RegisterResult, error)
+}
+
+// Deps are the things the API handlers depend on.
+type Deps struct {
+	ServerName string
+	DB         Pinger
+	Accounts   Accounts
+	Logger     *slog.Logger
+}
+
 // NewHandler returns the HTTP handler for the whole API.
-func NewHandler(serverName string, db Pinger, logger *slog.Logger) http.Handler {
+func NewHandler(d Deps) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v1/health", handleHealth(db, logger))
-	mux.HandleFunc("GET /api/v1/info", handleInfo(serverName))
+	mux.HandleFunc("GET /api/v1/health", handleHealth(d.DB, d.Logger))
+	mux.HandleFunc("GET /api/v1/info", handleInfo(d.ServerName))
+	mux.HandleFunc("POST /api/v1/register", handleRegister(d.Accounts, d.Logger))
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)
 
-	return recoverPanics(logger, mux)
+	return recoverPanics(d.Logger, mux)
 }
 
 type healthResponse struct {
@@ -105,10 +124,40 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	writeJSON(w, status, errorResponse{Error: errorDetail{Code: code, Message: message}})
 }
 
+// maxBodyBytes limits request bodies, so a client cannot exhaust memory with a huge request.
+const maxBodyBytes = 64 << 10 // 64 KiB
+
+// errBadRequest is returned by decodeJSON; its message is safe to show to the client.
+type errBadRequest struct{ msg string }
+
+func (e errBadRequest) Error() string { return e.msg }
+
+// decodeJSON reads a JSON request body into dst. It is strict on purpose:
+// unknown fields, a second JSON value, or a body over 64 KiB are all rejected.
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+
+	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			return errBadRequest{"request body is too large"}
+		}
+		return errBadRequest{fmt.Sprintf("invalid JSON body: %v", err)}
+	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errBadRequest{"request body must contain a single JSON object"}
+	}
+	return nil
+}
+
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	// Tell browsers not to guess a different content type (defense against MIME sniffing).
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Responses may contain session tokens or private data: never store them in any cache.
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body) // the client may have disconnected; nothing useful to do
 }

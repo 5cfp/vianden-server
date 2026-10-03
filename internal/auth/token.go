@@ -11,6 +11,7 @@ import (
 const (
 	SessionTokenPrefix = "vs_" // Vianden session
 	InviteCodePrefix   = "vi_" // Vianden invite
+	SetupTokenPrefix   = "vo_" // Vianden owner setup (one-time, printed at startup)
 )
 
 // tokenBytes is the amount of randomness in every token: 256 bits.

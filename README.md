@@ -35,9 +35,18 @@ One Go binary + PostgreSQL.
    Check it: open http://127.0.0.1:8080/api/v1/info in a browser. Stop it with `Ctrl+C`.
 
 ## Tests
+Some tests need a real PostgreSQL database. They use a separate `vianden_test` database (set by `VIANDEN_TEST_DATABASE_URL` in `.env`) and **delete all data in it**. Create it once:
+```powershell
+docker compose exec postgres createdb -U vianden vianden_test
+```
+Then run all tests:
 ```powershell
 go test ./...
 ```
+Without `VIANDEN_TEST_DATABASE_URL`, database tests are skipped (not failed).
+
+## First run: becoming the owner
+On a server without an owner, the console shows a one-time setup token (`vo_...`). Register with it as the invite code to become the owner. It works once, and is only printed while the server has no owner.
 
 ## Database code (sqlc)
 SQL queries live in `internal/db/queries/*.sql`. [sqlc](https://sqlc.dev) turns them into Go functions (files named `sqlc_*.go` and `*.sql.go` in `internal/db/`; never edit those by hand).
@@ -65,6 +74,7 @@ No output from `check` means everything is allowed.
 | Folder | What it contains |
 |---|---|
 | `cmd/server/` | Entry point (`main.go`): loads config, starts services |
+| `internal/accounts/` | Account logic: owner setup, registration, input validation |
 | `internal/api/` | REST API handlers |
 | `internal/auth/` | Password hashing (Argon2id) and secret tokens (sessions, invites) |
 | `internal/config/` | Loads settings from environment variables / `.env` |
@@ -72,6 +82,7 @@ No output from `check` means everything is allowed.
 | `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |
 | `internal/db/queries/` | SQL queries; sqlc generates Go code from them |
 | `internal/supervisor/` | Restarts a service if it crashes |
+| `internal/testdb/` | Test helper: a clean, migrated test database |
 | `internal/buildinfo/` | Server and protocol version numbers |
 | `docs/API.md` | Full API documentation for client developers |
 
