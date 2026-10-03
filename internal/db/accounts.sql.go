@@ -58,6 +58,60 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const getActiveSession = `-- name: GetActiveSession :one
+SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.last_used_at, sessions.expires_at, sessions.revoked_at, users.id, users.username, users.display_name, users.password_hash, users.is_owner, users.created_at
+FROM sessions
+JOIN users ON users.id = sessions.user_id
+WHERE sessions.token_hash = $1
+  AND sessions.revoked_at IS NULL
+  AND sessions.expires_at > now()
+`
+
+type GetActiveSessionRow struct {
+	Session Session
+	User    User
+}
+
+// Finds a session by token hash, only if it is not revoked and not expired, together with its user.
+func (q *Queries) GetActiveSession(ctx context.Context, tokenHash []byte) (GetActiveSessionRow, error) {
+	row := q.db.QueryRow(ctx, getActiveSession, tokenHash)
+	var i GetActiveSessionRow
+	err := row.Scan(
+		&i.Session.ID,
+		&i.Session.UserID,
+		&i.Session.TokenHash,
+		&i.Session.CreatedAt,
+		&i.Session.LastUsedAt,
+		&i.Session.ExpiresAt,
+		&i.Session.RevokedAt,
+		&i.User.ID,
+		&i.User.Username,
+		&i.User.DisplayName,
+		&i.User.PasswordHash,
+		&i.User.IsOwner,
+		&i.User.CreatedAt,
+	)
+	return i, err
+}
+
+const getUserByUsername = `-- name: GetUserByUsername :one
+SELECT id, username, display_name, password_hash, is_owner, created_at FROM users WHERE username = $1
+`
+
+func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByUsername, username)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.DisplayName,
+		&i.PasswordHash,
+		&i.IsOwner,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const lockUsableInvite = `-- name: LockUsableInvite :one
 SELECT id, code_hash, created_by, max_uses, uses, expires_at, created_at FROM invites
 WHERE code_hash = $1 AND uses < max_uses AND expires_at > now()
@@ -91,6 +145,30 @@ func (q *Queries) OwnerExists(ctx context.Context) (bool, error) {
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const revokeSession = `-- name: RevokeSession :exec
+UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeSession(ctx context.Context, id int64) error {
+	_, err := q.db.Exec(ctx, revokeSession, id)
+	return err
+}
+
+const touchSession = `-- name: TouchSession :exec
+UPDATE sessions SET last_used_at = now(), expires_at = $2 WHERE id = $1
+`
+
+type TouchSessionParams struct {
+	ID        int64
+	ExpiresAt time.Time
+}
+
+// Sliding expiry: a used session stays valid for another full lifetime.
+func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) error {
+	_, err := q.db.Exec(ctx, touchSession, arg.ID, arg.ExpiresAt)
+	return err
 }
 
 const useInvite = `-- name: UseInvite :exec

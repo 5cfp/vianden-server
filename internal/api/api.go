@@ -25,7 +25,10 @@ type Pinger interface {
 // Accounts is the account logic the API needs.
 // The real server passes an *accounts.Service; tests pass a fake.
 type Accounts interface {
-	Register(ctx context.Context, in accounts.RegisterInput) (accounts.RegisterResult, error)
+	Register(ctx context.Context, in accounts.RegisterInput) (accounts.AuthResult, error)
+	Login(ctx context.Context, username, password string) (accounts.AuthResult, error)
+	Authenticate(ctx context.Context, token string) (accounts.Session, error)
+	Logout(ctx context.Context, sessionID int64) error
 }
 
 // Deps are the things the API handlers depend on.
@@ -41,7 +44,16 @@ func NewHandler(d Deps) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", handleHealth(d.DB, d.Logger))
 	mux.HandleFunc("GET /api/v1/info", handleInfo(d.ServerName))
-	mux.HandleFunc("POST /api/v1/register", handleRegister(d.Accounts, d.Logger))
+
+	// Login and register share one limit per client: 10 attempts, then 1 more every 6 seconds.
+	authLimit := newIPRateLimiter(10, 10)
+	mux.HandleFunc("POST /api/v1/register", authLimit.limit(handleRegister(d.Accounts, d.Logger)))
+	mux.HandleFunc("POST /api/v1/login", authLimit.limit(handleLogin(d.Accounts, d.Logger)))
+
+	// These need a valid session token.
+	mux.HandleFunc("POST /api/v1/logout", requireAuth(d.Accounts, d.Logger, handleLogout(d.Accounts, d.Logger)))
+	mux.HandleFunc("GET /api/v1/me", requireAuth(d.Accounts, d.Logger, handleMe))
+
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)
 

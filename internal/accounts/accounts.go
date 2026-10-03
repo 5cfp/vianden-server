@@ -70,14 +70,14 @@ type User struct {
 	IsOwner     bool
 }
 
-// RegisterResult is a new account plus a session token, so the user is logged in right away.
-type RegisterResult struct {
+// AuthResult is an account plus a new session token (returned by Register and Login).
+type AuthResult struct {
 	User         User
 	SessionToken string
 }
 
 // Register creates an account. It returns a *ValidationError for bad input, or one of the Err* values.
-func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterResult, error) {
+func (s *Service) Register(ctx context.Context, in RegisterInput) (AuthResult, error) {
 	username := NormalizeUsername(in.Username)
 	displayName := strings.TrimSpace(in.DisplayName)
 	if displayName == "" {
@@ -86,13 +86,13 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterResul
 
 	// Check the input first. Nothing about invites or existing users is revealed by these errors.
 	if err := validateUsername(username); err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 	if err := validateDisplayName(displayName); err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 	if err := validatePassword(in.Password); err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 
 	code := strings.TrimSpace(in.InviteCode)
@@ -104,19 +104,19 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (RegisterResul
 	return s.registerWithInvite(ctx, code, user, in.Password)
 }
 
-func (s *Service) registerOwner(ctx context.Context, setupToken string, user db.CreateUserParams, password string) (RegisterResult, error) {
+func (s *Service) registerOwner(ctx context.Context, setupToken string, user db.CreateUserParams, password string) (AuthResult, error) {
 	if !s.checkSetupToken(setupToken) {
-		return RegisterResult{}, ErrInvalidSetupToken
+		return AuthResult{}, ErrInvalidSetupToken
 	}
 
 	user.PasswordHash = auth.HashPassword(password)
 	user.IsOwner = true
 
-	result, err := s.inTx(ctx, func(q *db.Queries) (RegisterResult, error) {
+	result, err := s.inTx(ctx, func(q *db.Queries) (AuthResult, error) {
 		return s.createUserWithSession(ctx, q, user)
 	})
 	if err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 
 	// The token has done its job: forget it so it can never be used again.
@@ -126,16 +126,16 @@ func (s *Service) registerOwner(ctx context.Context, setupToken string, user db.
 	return result, nil
 }
 
-func (s *Service) registerWithInvite(ctx context.Context, code string, user db.CreateUserParams, password string) (RegisterResult, error) {
+func (s *Service) registerWithInvite(ctx context.Context, code string, user db.CreateUserParams, password string) (AuthResult, error) {
 	// Everything below happens in ONE transaction: either the account is created AND the
 	// invite use is counted AND the session is created, or nothing happens at all.
-	return s.inTx(ctx, func(q *db.Queries) (RegisterResult, error) {
+	return s.inTx(ctx, func(q *db.Queries) (AuthResult, error) {
 		invite, err := q.LockUsableInvite(ctx, auth.HashToken(code))
 		if errors.Is(err, pgx.ErrNoRows) {
-			return RegisterResult{}, ErrInvalidInvite
+			return AuthResult{}, ErrInvalidInvite
 		}
 		if err != nil {
-			return RegisterResult{}, err
+			return AuthResult{}, err
 		}
 
 		// Hashed only after the invite is confirmed valid, so random requests without a
@@ -144,36 +144,36 @@ func (s *Service) registerWithInvite(ctx context.Context, code string, user db.C
 
 		result, err := s.createUserWithSession(ctx, q, user)
 		if err != nil {
-			return RegisterResult{}, err // e.g. username taken: the rollback also "un-uses" the invite
+			return AuthResult{}, err // e.g. username taken: the rollback also "un-uses" the invite
 		}
 		if err := q.UseInvite(ctx, invite.ID); err != nil {
-			return RegisterResult{}, err
+			return AuthResult{}, err
 		}
 		return result, nil
 	})
 }
 
-func (s *Service) createUserWithSession(ctx context.Context, q *db.Queries, params db.CreateUserParams) (RegisterResult, error) {
+func (s *Service) createUserWithSession(ctx context.Context, q *db.Queries, params db.CreateUserParams) (AuthResult, error) {
 	u, err := q.CreateUser(ctx, params)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation
 			switch pgErr.ConstraintName {
 			case "users_username_key":
-				return RegisterResult{}, ErrUsernameTaken
+				return AuthResult{}, ErrUsernameTaken
 			case "users_single_owner_idx": // another owner registered at the same moment
-				return RegisterResult{}, ErrInvalidSetupToken
+				return AuthResult{}, ErrInvalidSetupToken
 			}
 		}
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 
 	token, err := createSession(ctx, q, u.ID)
 	if err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
-	return RegisterResult{
-		User:         User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, IsOwner: u.IsOwner},
+	return AuthResult{
+		User:         toUser(u),
 		SessionToken: token,
 	}, nil
 }
@@ -200,19 +200,19 @@ func (s *Service) checkSetupToken(token string) bool {
 }
 
 // inTx runs fn inside a database transaction: committed if fn succeeds, rolled back if it fails.
-func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) (RegisterResult, error)) (RegisterResult, error) {
+func (s *Service) inTx(ctx context.Context, fn func(q *db.Queries) (AuthResult, error)) (AuthResult, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 	defer tx.Rollback(ctx) // does nothing if Commit already succeeded
 
 	result, err := fn(s.queries.WithTx(tx))
 	if err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return RegisterResult{}, err
+		return AuthResult{}, err
 	}
 	return result, nil
 }

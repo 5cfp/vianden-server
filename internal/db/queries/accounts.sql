@@ -20,3 +20,22 @@ FOR UPDATE;
 
 -- name: UseInvite :exec
 UPDATE invites SET uses = uses + 1 WHERE id = $1;
+
+-- name: GetUserByUsername :one
+SELECT * FROM users WHERE username = $1;
+
+-- name: GetActiveSession :one
+-- Finds a session by token hash, only if it is not revoked and not expired, together with its user.
+SELECT sqlc.embed(sessions), sqlc.embed(users)
+FROM sessions
+JOIN users ON users.id = sessions.user_id
+WHERE sessions.token_hash = $1
+  AND sessions.revoked_at IS NULL
+  AND sessions.expires_at > now();
+
+-- name: TouchSession :exec
+-- Sliding expiry: a used session stays valid for another full lifetime.
+UPDATE sessions SET last_used_at = now(), expires_at = $2 WHERE id = $1;
+
+-- name: RevokeSession :exec
+UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL;

@@ -11,14 +11,41 @@ import (
 	"github.com/5cfp/vianden-server/internal/accounts"
 )
 
-// fakeAccounts returns a fixed result or error, and remembers what it received.
+// fakeAccounts returns fixed results or errors, and remembers what it received.
 type fakeAccounts struct {
-	result accounts.RegisterResult
+	result accounts.AuthResult
 	err    error
 	got    *accounts.RegisterInput
+
+	// For Authenticate: the one valid token, and the session it belongs to.
+	validToken string
+	session    accounts.Session
+	authErr    error
+	loggedOut  *int64 // receives the session ID passed to Logout
 }
 
-func (f fakeAccounts) Register(_ context.Context, in accounts.RegisterInput) (accounts.RegisterResult, error) {
+func (f fakeAccounts) Login(_ context.Context, _, _ string) (accounts.AuthResult, error) {
+	return f.result, f.err
+}
+
+func (f fakeAccounts) Authenticate(_ context.Context, token string) (accounts.Session, error) {
+	if f.authErr != nil {
+		return accounts.Session{}, f.authErr
+	}
+	if f.validToken == "" || token != f.validToken {
+		return accounts.Session{}, accounts.ErrUnauthenticated
+	}
+	return f.session, nil
+}
+
+func (f fakeAccounts) Logout(_ context.Context, sessionID int64) error {
+	if f.loggedOut != nil {
+		*f.loggedOut = sessionID
+	}
+	return nil
+}
+
+func (f fakeAccounts) Register(_ context.Context, in accounts.RegisterInput) (accounts.AuthResult, error) {
 	if f.got != nil {
 		*f.got = in
 	}
@@ -37,7 +64,7 @@ func postRegister(t *testing.T, acc Accounts, body string) *httptest.ResponseRec
 func TestRegisterSuccess(t *testing.T) {
 	var got accounts.RegisterInput
 	acc := fakeAccounts{
-		result: accounts.RegisterResult{
+		result: accounts.AuthResult{
 			User:         accounts.User{ID: 7, Username: "osama", DisplayName: "Osama", IsOwner: true},
 			SessionToken: "vs_secret",
 		},

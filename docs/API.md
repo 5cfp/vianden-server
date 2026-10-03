@@ -73,9 +73,12 @@ Every error response (any 4xx or 5xx status) has this body:
 | `invalid_display_name` | 400 | Display name breaks the [display name rules](#account-rules). |
 | `invalid_password` | 400 | Password breaks the [password rules](#account-rules). |
 | `invalid_invite` | 403 | Invite code is unknown, expired, or used up. |
+| `invalid_credentials` | 401 | Login failed: wrong username or password (the response never says which). |
+| `unauthorized` | 401 | The session token is missing, malformed, unknown, expired, or revoked. The response also has the header `WWW-Authenticate: Bearer`. |
 | `invalid_setup_token` | 403 | Owner setup token is wrong, or the server already has an owner. |
 | `not_found` | 404 | No route matches the method and path. |
 | `username_taken` | 409 | Another account already has this username (comparison ignores case). |
+| `rate_limited` | 429 | Too many attempts. Wait the number of seconds in the `Retry-After` header. |
 | `internal_error` | 500 | Unexpected server error. Details are only in the server log. |
 
 ---
@@ -83,16 +86,17 @@ Every error response (any 4xx or 5xx status) has this body:
 ## 3. Authentication
 
 ### Session tokens
-Registering (and, soon, logging in) returns a **session token**: an opaque string like `vs_3kQ9xZ...` (46 characters: the prefix `vs_` plus 43 URL-safe base64 characters).
+Registering and logging in return a **session token**: an opaque string like `vs_3kQ9xZ...` (46 characters: the prefix `vs_` plus 43 URL-safe base64 characters).
 
 - Treat it like a password: store it securely (for example in the OS keychain), never log it, never put it in a URL.
 - Send it on every authenticated request in the `Authorization` header:
   ```
   Authorization: Bearer vs_3kQ9xZ...
   ```
-  > Endpoints that require a token arrive in the next step (login, logout, `GET /api/v1/me`).
 - A session expires after **30 days without use**. Using it extends the expiry.
 - There is no separate refresh token.
+- Each login creates a new session, so every device has its own token. Logging out ends only that session.
+- If a request with a token gets `401 unauthorized`, the token is no longer valid: delete it and show the login screen. Do **not** do this on `500` errors (the server may just be having trouble).
 
 ### Owner setup (first run)
 A new server has no owner. While that is true, the server prints a **one-time setup token** (`vo_...`) to its console at every start. The person running the server registers with it, using it as the `invite_code`, and becomes the **owner**. After that the setup token never works again, and no new one is printed.
@@ -213,12 +217,72 @@ Creates an account and logs it in. Use the owner setup token as `invite_code` fo
 - **Errors:** `invalid_request` (400), `invalid_username` (400), `invalid_display_name` (400), `invalid_password` (400), `invalid_invite` (403), `invalid_setup_token` (403), `username_taken` (409).
 - **Order of checks:** the input fields are validated first. Then the invite or setup token is checked. Only with a valid invite can `username_taken` be returned, so people without an invite cannot probe which usernames exist.
 - A failed registration never uses up an invite.
+- **Rate limited** together with login (see [Rate limits](#rate-limits)).
 
 Example:
 ```
 curl -X POST http://127.0.0.1:8080/api/v1/register \
   -H "Content-Type: application/json" \
   -d '{"username":"osama","password":"correct horse battery staple","invite_code":"vo_..."}'
+```
+
+### `POST /api/v1/login`
+Logs in and starts a new session.
+
+- **Auth:** none
+- **Request body:**
+
+```json
+{ "username": "Osama", "password": "correct horse battery staple" }
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `username` | string | yes | Case-insensitive; surrounding spaces are ignored. |
+| `password` | string | yes | |
+
+- **Response `200 OK`:** same shape as [register](#post-apiv1register): `{ "user": {...}, "token": "vs_..." }`.
+- **Errors:** `invalid_request` (400), `invalid_credentials` (401), `rate_limited` (429).
+- Wrong password and unknown username give the **same** error and take about the same time, so login cannot be used to find out which usernames exist.
+- **Rate limited** together with register (see [Rate limits](#rate-limits)).
+
+Example:
+```
+curl -X POST http://127.0.0.1:8080/api/v1/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"osama","password":"correct horse battery staple"}'
+```
+
+### `POST /api/v1/logout`
+Ends the current session. Its token stops working immediately. Other sessions of the same user (other devices) are not affected.
+
+- **Auth:** session token
+- **Request body:** none
+- **Response `204 No Content`:** no body.
+- **Errors:** `unauthorized` (401).
+
+Example:
+```
+curl -X POST http://127.0.0.1:8080/api/v1/logout -H "Authorization: Bearer vs_..."
+```
+
+### `GET /api/v1/me`
+Returns the logged-in user. Useful at app start to check whether a stored token is still valid.
+
+- **Auth:** session token
+- **Response `200 OK`:**
+
+```json
+{
+  "user": { "id": 1, "username": "osama", "display_name": "Osama", "is_owner": true }
+}
+```
+
+- **Errors:** `unauthorized` (401).
+
+Example:
+```
+curl http://127.0.0.1:8080/api/v1/me -H "Authorization: Bearer vs_..."
 ```
 
 ---
@@ -242,7 +306,12 @@ curl -X POST http://127.0.0.1:8080/api/v1/register \
 | Request body size | 64 KiB |
 | Username / display name / password length | See [Account rules](#account-rules) |
 
-Rate limits on authentication endpoints arrive in the next step of M1.
+### Rate limits
+| Endpoints | Limit |
+|---|---|
+| `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
+
+Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
 
 ---
 
@@ -253,4 +322,5 @@ Rate limits on authentication endpoints arrive in the next step of M1.
 - Added `GET /api/v1/info`.
 - Added the standard error format.
 - Added `POST /api/v1/register`, session tokens, owner setup, invites, and account rules.
+- Added `POST /api/v1/login`, `POST /api/v1/logout`, `GET /api/v1/me`, bearer token authentication, and rate limits on register and login.
 - All responses now send `Cache-Control: no-store`; request bodies are limited to 64 KiB and parsed strictly.
