@@ -28,10 +28,29 @@ One Go binary + PostgreSQL.
 | Delete all local data | `docker compose down -v` |
 | Open a SQL shell | `docker compose exec postgres psql -U vianden -d vianden` |
 
-More run instructions will be added as the server grows.
+3. Run the server:
+   ```powershell
+   go run ./cmd/server
+   ```
+   Check it: open http://127.0.0.1:8080/api/v1/info in a browser. Stop it with `Ctrl+C`.
+
+## Tests
+```powershell
+go test ./...
+```
+
+## Project layout
+| Folder | What it contains |
+|---|---|
+| `cmd/server/` | Entry point (`main.go`): loads config, starts services |
+| `internal/api/` | REST API handlers |
+| `internal/config/` | Loads settings from environment variables / `.env` |
+| `internal/supervisor/` | Restarts a service if it crashes |
+| `internal/buildinfo/` | Server and protocol version numbers |
+| `docs/API.md` | Full API documentation for client developers |
 
 ## Documentation
-- API for client developers: `docs/API.md` (coming in M0)
+- API for client developers: [docs/API.md](docs/API.md)
 
 ## License
 MIT, see [LICENSE](LICENSE).

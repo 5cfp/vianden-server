@@ -1,0 +1,81 @@
+package api
+
+import (
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/5cfp/vianden-server/internal/buildinfo"
+)
+
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// do sends a request to h and returns the recorded response.
+func do(t *testing.T, h http.Handler, method, path string) *httptest.ResponseRecorder {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(method, path, nil))
+	return rec
+}
+
+func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
+	t.Helper()
+	var v T
+	if err := json.NewDecoder(rec.Body).Decode(&v); err != nil {
+		t.Fatalf("response is not valid JSON: %v", err)
+	}
+	return v
+}
+
+func TestHealth(t *testing.T) {
+	rec := do(t, NewHandler("Test", discardLogger), "GET", "/api/v1/health")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := decode[map[string]string](t, rec)["status"]; got != "ok" {
+		t.Errorf(`status field = %q, want "ok"`, got)
+	}
+}
+
+func TestInfo(t *testing.T) {
+	rec := do(t, NewHandler("My Server", discardLogger), "GET", "/api/v1/info")
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := decode[infoResponse](t, rec)
+	want := infoResponse{Name: "My Server", Version: buildinfo.Version, ProtocolVersion: buildinfo.ProtocolVersion}
+	if got != want {
+		t.Errorf("info = %+v, want %+v", got, want)
+	}
+}
+
+func TestUnknownRouteReturnsJSON404(t *testing.T) {
+	rec := do(t, NewHandler("Test", discardLogger), "GET", "/api/v1/does-not-exist")
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	if got := decode[errorResponse](t, rec).Error.Code; got != "not_found" {
+		t.Errorf("error code = %q, want not_found", got)
+	}
+}
+
+func TestPanicReturns500WithoutDetails(t *testing.T) {
+	panicking := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("secret internal detail")
+	})
+	rec := do(t, recoverPanics(discardLogger, panicking), "GET", "/")
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	body := decode[errorResponse](t, rec)
+	if body.Error.Code != "internal_error" || body.Error.Message != "internal server error" {
+		t.Errorf("unexpected error body: %+v (panic details must not leak)", body)
+	}
+}

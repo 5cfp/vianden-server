@@ -1,0 +1,77 @@
+// Command server is the vianden-server entry point.
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/5cfp/vianden-server/internal/api"
+	"github.com/5cfp/vianden-server/internal/buildinfo"
+	"github.com/5cfp/vianden-server/internal/config"
+	"github.com/5cfp/vianden-server/internal/supervisor"
+)
+
+func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+
+	if err := run(logger); err != nil {
+		logger.Error("server stopped with an error", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(logger *slog.Logger) error {
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+
+	// ctx is cancelled when you press Ctrl+C (or the OS asks the process to stop).
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	logger.Info("starting vianden-server",
+		"version", buildinfo.Version, "protocol_version", buildinfo.ProtocolVersion, "listen", cfg.ListenAddr)
+
+	handler := api.NewHandler(cfg.ServerName, logger)
+	supervisor.Run(ctx, logger, "http", func(ctx context.Context) error {
+		return serveHTTP(ctx, cfg.ListenAddr, handler)
+	})
+
+	logger.Info("vianden-server stopped")
+	return nil
+}
+
+// serveHTTP runs the HTTP server until ctx is cancelled, then shuts it down gracefully
+// (in-flight requests get up to 10 seconds to finish).
+func serveHTTP(ctx context.Context, addr string, handler http.Handler) error {
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: handler,
+		// Slowloris defense: a client that sends its headers very slowly
+		// cannot hold a connection open forever.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+	}
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-errCh:
+		return err // e.g. the port is already in use
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+		return nil
+	}
+}
