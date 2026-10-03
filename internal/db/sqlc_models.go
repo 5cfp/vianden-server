@@ -3,3 +3,36 @@
 //   sqlc v1.31.1
 
 package db
+
+import (
+	"time"
+)
+
+type Invite struct {
+	ID        int64
+	CodeHash  []byte
+	CreatedBy int64
+	MaxUses   int32
+	Uses      int32
+	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
+type Session struct {
+	ID         int64
+	UserID     int64
+	TokenHash  []byte
+	CreatedAt  time.Time
+	LastUsedAt time.Time
+	ExpiresAt  time.Time
+	RevokedAt  *time.Time
+}
+
+type User struct {
+	ID           int64
+	Username     string
+	DisplayName  string
+	PasswordHash string
+	IsOwner      bool
+	CreatedAt    time.Time
+}

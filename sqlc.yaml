@@ -13,3 +13,13 @@ sql:
         # Rename the generated db/models files so they never clash with our own db.go.
         output_db_file_name: sqlc_db.go
         output_models_file_name: sqlc_models.go
+        # Use Go's standard time.Time for timestamps (nullable ones become *time.Time, where nil = NULL).
+        overrides:
+          - db_type: timestamptz
+            go_type: time.Time
+          - db_type: timestamptz
+            nullable: true
+            go_type:
+              import: time
+              type: Time
+              pointer: true
