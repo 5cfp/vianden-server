@@ -72,10 +72,13 @@ Every error response (any 4xx or 5xx status) has this body:
 | `invalid_username` | 400 | Username breaks the [username rules](#account-rules). |
 | `invalid_display_name` | 400 | Display name breaks the [display name rules](#account-rules). |
 | `invalid_password` | 400 | Password breaks the [password rules](#account-rules). |
+| `invalid_max_uses` | 400 | Invite `max_uses` is outside 1-100. |
+| `invalid_expires_in_hours` | 400 | Invite `expires_in_hours` is outside 1-720. |
 | `invalid_invite` | 403 | Invite code is unknown, expired, or used up. |
 | `invalid_credentials` | 401 | Login failed: wrong username or password (the response never says which). |
 | `unauthorized` | 401 | The session token is missing, malformed, unknown, expired, or revoked. The response also has the header `WWW-Authenticate: Bearer`. |
 | `invalid_setup_token` | 403 | Owner setup token is wrong, or the server already has an owner. |
+| `forbidden` | 403 | You are logged in, but not allowed to do this (for example, a member managing invites). |
 | `not_found` | 404 | No route matches the method and path. |
 | `username_taken` | 409 | Another account already has this username (comparison ignores case). |
 | `rate_limited` | 429 | Too many attempts. Wait the number of seconds in the `Retry-After` header. |
@@ -102,7 +105,9 @@ Registering and logging in return a **session token**: an opaque string like `vs
 A new server has no owner. While that is true, the server prints a **one-time setup token** (`vo_...`) to its console at every start. The person running the server registers with it, using it as the `invite_code`, and becomes the **owner**. After that the setup token never works again, and no new one is printed.
 
 ### Invites
-Everyone else needs an **invite code** (`vi_...`) from the owner. Invite codes have a maximum number of uses and always expire.
+Everyone else needs an **invite code** (`vi_...`) from the owner. Invite codes have a maximum number of uses and always expire. The owner creates them with [`POST /api/v1/invites`](#post-apiv1invites). The code is shown **only once**, when it is created (the server stores only its hash).
+
+In this protocol version only the owner can manage invites. Roles (admins, moderators) come later.
 
 ### Account rules
 | Field | Rules |
@@ -285,6 +290,70 @@ Example:
 curl http://127.0.0.1:8080/api/v1/me -H "Authorization: Bearer vs_..."
 ```
 
+### `POST /api/v1/invites`
+Creates an invite code.
+
+- **Auth:** session token; **owner only**
+- **Request body:** a JSON object (send `{}` to use all defaults).
+
+```json
+{ "max_uses": 3, "expires_in_hours": 48 }
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `max_uses` | integer | no | 1-100. Default: 1. |
+| `expires_in_hours` | integer | no | 1-720 (30 days). Default: 168 (7 days). |
+
+- **Response `201 Created`:**
+
+```json
+{
+  "invite": {
+    "id": 1,
+    "created_by": 1,
+    "max_uses": 3,
+    "uses": 0,
+    "expires_at": "2026-10-06T12:00:00Z",
+    "created_at": "2026-10-04T12:00:00Z"
+  },
+  "code": "vi_Qm9vb3Ro..."
+}
+```
+
+| Field | Type | Meaning |
+|---|---|---|
+| `invite` | object | The [invite object](#invite-object). |
+| `code` | string | The invite code to share. **Shown only in this response**; it cannot be retrieved again. |
+
+- **Errors:** `invalid_request` (400), `invalid_max_uses` (400), `invalid_expires_in_hours` (400), `unauthorized` (401), `forbidden` (403).
+
+#### Invite object
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Invite ID (used to delete it). |
+| `created_by` | integer | User ID of the creator. |
+| `max_uses` | integer | How many accounts can be created with it. |
+| `uses` | integer | How many have been created so far. |
+| `expires_at` | string | Expiry time, RFC 3339 in UTC. |
+| `created_at` | string | Creation time, RFC 3339 in UTC. |
+
+An invite is usable while `uses < max_uses` and `expires_at` is in the future.
+
+### `GET /api/v1/invites`
+Lists all invites, newest first, including used-up and expired ones. Codes are never included.
+
+- **Auth:** session token; **owner only**
+- **Response `200 OK`:** `{ "invites": [ <invite object>, ... ] }` (an empty list is `[]`).
+- **Errors:** `unauthorized` (401), `forbidden` (403).
+
+### `DELETE /api/v1/invites/{id}`
+Deletes an invite. Its code stops working immediately (use this if a code leaked). Accounts already created with it are not affected.
+
+- **Auth:** session token; **owner only**
+- **Response `204 No Content`:** no body.
+- **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404).
+
 ---
 
 ## 5. WebSocket
@@ -323,4 +392,5 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added the standard error format.
 - Added `POST /api/v1/register`, session tokens, owner setup, invites, and account rules.
 - Added `POST /api/v1/login`, `POST /api/v1/logout`, `GET /api/v1/me`, bearer token authentication, and rate limits on register and login.
+- Added `POST /api/v1/invites`, `GET /api/v1/invites`, `DELETE /api/v1/invites/{id}` (owner only).
 - All responses now send `Cache-Control: no-store`; request bodies are limited to 64 KiB and parsed strictly.

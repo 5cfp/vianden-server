@@ -22,6 +22,34 @@ type fakeAccounts struct {
 	session    accounts.Session
 	authErr    error
 	loggedOut  *int64 // receives the session ID passed to Logout
+
+	// For the invite methods.
+	invite    accounts.Invite
+	invites   []accounts.Invite
+	inviteErr error
+	gotInvite *[3]int64 // receives (user ID, maxUses, hours)
+	deleted   *int64
+}
+
+func (f fakeAccounts) CreateInvite(_ context.Context, by accounts.User, maxUses, hours int) (accounts.Invite, string, error) {
+	if f.inviteErr != nil {
+		return accounts.Invite{}, "", f.inviteErr
+	}
+	if f.gotInvite != nil {
+		*f.gotInvite = [3]int64{by.ID, int64(maxUses), int64(hours)}
+	}
+	return f.invite, "vi_newcode", nil
+}
+
+func (f fakeAccounts) ListInvites(_ context.Context, _ accounts.User) ([]accounts.Invite, error) {
+	return f.invites, f.inviteErr
+}
+
+func (f fakeAccounts) DeleteInvite(_ context.Context, _ accounts.User, id int64) error {
+	if f.deleted != nil {
+		*f.deleted = id
+	}
+	return f.inviteErr
 }
 
 func (f fakeAccounts) Login(_ context.Context, _, _ string) (accounts.AuthResult, error) {

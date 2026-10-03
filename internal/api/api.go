@@ -29,6 +29,10 @@ type Accounts interface {
 	Login(ctx context.Context, username, password string) (accounts.AuthResult, error)
 	Authenticate(ctx context.Context, token string) (accounts.Session, error)
 	Logout(ctx context.Context, sessionID int64) error
+
+	CreateInvite(ctx context.Context, by accounts.User, maxUses, expiresInHours int) (accounts.Invite, string, error)
+	ListInvites(ctx context.Context, by accounts.User) ([]accounts.Invite, error)
+	DeleteInvite(ctx context.Context, by accounts.User, id int64) error
 }
 
 // Deps are the things the API handlers depend on.
@@ -53,6 +57,9 @@ func NewHandler(d Deps) http.Handler {
 	// These need a valid session token.
 	mux.HandleFunc("POST /api/v1/logout", requireAuth(d.Accounts, d.Logger, handleLogout(d.Accounts, d.Logger)))
 	mux.HandleFunc("GET /api/v1/me", requireAuth(d.Accounts, d.Logger, handleMe))
+	mux.HandleFunc("POST /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleCreateInvite(d.Accounts, d.Logger)))
+	mux.HandleFunc("GET /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleListInvites(d.Accounts, d.Logger)))
+	mux.HandleFunc("DELETE /api/v1/invites/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteInvite(d.Accounts, d.Logger)))
 
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)
