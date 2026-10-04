@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 )
@@ -31,6 +32,11 @@ const (
 	pingInterval          = 30 * time.Second // keeps the connection alive and detects dead ones
 	writeTimeout          = 10 * time.Second
 	typingThrottle        = 2 * time.Second // one typing event per user and channel at most this often
+	typingThrottleAny     = time.Second     // and at most one per connection per second, across all channels
+	// Client messages per connection: 10 per second on average, bursts of 20. More than
+	// that is not a normal app, so the connection is closed (policy violation, 1008).
+	incomingPerSecond = 10
+	incomingBurst     = 20
 )
 
 // Custom close codes (4000-4999 are free for applications).
@@ -82,7 +88,9 @@ type client struct {
 	closing bool
 
 	// Only used by this client's reader goroutine.
-	lastTyping map[int64]time.Time
+	lastTyping    map[int64]time.Time
+	lastTypingAny time.Time
+	incoming      *rate.Limiter
 }
 
 func NewHub(logger *slog.Logger) *Hub {
@@ -112,6 +120,7 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, s accounts.Session) 
 		conn:       conn,
 		send:       make(chan []byte, sendQueueSize),
 		lastTyping: make(map[int64]time.Time),
+		incoming:   rate.NewLimiter(incomingPerSecond, incomingBurst),
 	}
 
 	h.register(c)
@@ -299,6 +308,18 @@ func (h *Hub) readLoop(c *client) {
 		if err != nil {
 			return // closed by either side, or a message over the read limit
 		}
+		if !c.incoming.Allow() {
+			// Closed right here (not in a goroutine): the close message must be sent before
+			// Serve cleans up, so the client learns why (code 1008).
+			h.mu.Lock()
+			first := !c.closing
+			c.closing = true
+			h.mu.Unlock()
+			if first {
+				c.conn.Close(websocket.StatusPolicyViolation, "too many messages")
+			}
+			return
+		}
 		var in incoming
 		if json.Unmarshal(data, &in) != nil {
 			continue // not JSON: ignore
@@ -311,10 +332,14 @@ func (h *Hub) readLoop(c *client) {
 
 func (h *Hub) handleTyping(c *client, channelID int64) {
 	now := time.Now()
-	if now.Sub(c.lastTyping[channelID]) < typingThrottle {
-		return // a client sending typing events in a loop cannot flood everyone else
+	// Two limits: per channel, and overall. Without the overall one, a client could send
+	// typing for channel 1, 2, 3, ... and every id would pass its own per-channel limit,
+	// flooding everyone else with events (one sender, many receivers = amplification).
+	if now.Sub(c.lastTyping[channelID]) < typingThrottle || now.Sub(c.lastTypingAny) < typingThrottleAny {
+		return
 	}
 	c.lastTyping[channelID] = now
+	c.lastTypingAny = now
 	h.broadcastExceptUser(Event{"typing.started", map[string]any{"channel_id": channelID, "user": userInfo(c.user)}}, c.user.ID)
 }
 

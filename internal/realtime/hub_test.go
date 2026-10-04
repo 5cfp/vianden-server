@@ -313,3 +313,45 @@ func TestCrossSiteBrowserPagesAreRejected(t *testing.T) {
 		t.Errorf("cross-origin connection: err %v, resp %v; want 403", err, resp)
 	}
 }
+
+// One client must not be able to flood everyone with typing events by using a
+// different channel id each time (each id has its own 2-second throttle).
+func TestTypingCannotBeAmplifiedWithManyChannelIDs(t *testing.T) {
+	_, url := testServer(t)
+	a, _ := dial(t, url, 1, 1)
+	b, _ := dial(t, url, 2, 2)
+	a.next() // presence of b
+
+	// 15 ids: within the per-connection message allowance (burst 20), so only the typing limits act.
+	for ch := 1; ch <= 15; ch++ {
+		a.send(`{"type":"typing","data":{"channel_id":` + strconv.Itoa(ch) + `}}`)
+	}
+	time.Sleep(300 * time.Millisecond)
+	received := 0
+	for {
+		select {
+		case <-b.events:
+			received++
+			continue
+		default:
+		}
+		break
+	}
+	if received > 2 {
+		t.Errorf("b received %d typing events from 15 sent in a burst; want at most a couple", received)
+	}
+}
+
+// A client sending messages in a tight loop is disconnected instead of using up CPU.
+func TestClientMessageFloodIsDisconnected(t *testing.T) {
+	_, url := testServer(t)
+	a, _ := dial(t, url, 1, 1)
+	for range 500 {
+		if a.c.Write(context.Background(), websocket.MessageText, []byte(`{"type":"noop"}`)) != nil {
+			break // already closed by the server
+		}
+	}
+	if code := a.closeStatus(); code != websocket.StatusPolicyViolation {
+		t.Errorf("close code = %d, want %d (policy violation)", code, websocket.StatusPolicyViolation)
+	}
+}

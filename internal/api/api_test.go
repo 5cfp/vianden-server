@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/5cfp/vianden-server/internal/buildinfo"
@@ -98,5 +99,35 @@ func TestPanicReturns500WithoutDetails(t *testing.T) {
 	body := decode[errorResponse](t, rec)
 	if body.Error.Code != "internal_error" || body.Error.Message != "internal server error" {
 		t.Errorf("unexpected error body: %+v (panic details must not leak)", body)
+	}
+}
+
+func TestJSONErrorsDoNotRevealInternals(t *testing.T) {
+	cases := map[string]string{
+		`{"username":123}`:        `field "username" has the wrong type`,
+		`{"username":"a"`:         "request body is not valid JSON",
+		`not json`:                "request body is not valid JSON",
+		``:                        "request body is empty",
+		`{"username":"a","x":1}`:  `unknown field "x"`,
+		`{"username":"a"}{"b":1}`: "request body must contain a single JSON object",
+	}
+	for body, want := range cases {
+		rec := postRegister(t, fakeAccounts{}, body)
+		msg := decode[errorResponse](t, rec).Error.Message
+		if msg != want {
+			t.Errorf("body %q: message %q, want %q", body, msg, want)
+		}
+		if strings.Contains(msg, "Go struct") || strings.Contains(msg, "registerRequest") {
+			t.Errorf("body %q: message reveals internal names: %q", body, msg)
+		}
+	}
+}
+
+func TestForLogShortensLongValues(t *testing.T) {
+	if got := forLog(strings.Repeat("A", 60000)); len([]rune(got)) != 65 {
+		t.Errorf("length %d, want 64 characters + …", len([]rune(got)))
+	}
+	if got := forLog("osama"); got != "osama" {
+		t.Errorf("short value changed: %q", got)
 	}
 }

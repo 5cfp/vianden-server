@@ -104,7 +104,7 @@ func createSelfSigned(dir, certFile, keyFile, domain string) error {
 	if err := os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), 0o600); err != nil {
 		return err
 	}
-	return os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644)
+	return os.WriteFile(certFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600) // only the server reads it
 }
 
 // Fingerprint is the SHA-256 of a certificate (DER bytes), as uppercase hex pairs joined by

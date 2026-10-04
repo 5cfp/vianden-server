@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -187,5 +188,19 @@ func TestPortInUseIsReported(t *testing.T) {
 	err = Serve(context.Background(), config.Config{TLSMode: config.TLSPlain, ListenAddr: ln.Addr().String()}, ok, nil, discard)
 	if err == nil {
 		t.Error("expected an error for a port that is already in use")
+	}
+}
+
+func TestRedirectCannotLeaveOurDomain(t *testing.T) {
+	h := redirectToHTTPS("chat.example.com", ok)
+	for _, path := range []string{"//evil.example/x", `/\evil.example`, "/%2F%2Fevil.example", "/@evil.example"} {
+		req := httptest.NewRequest("GET", "http://chat.example.com"+path, nil)
+		req.RemoteAddr = "203.0.113.9:5555"
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		loc, err := url.Parse(rec.Header().Get("Location"))
+		if err != nil || loc.Host != "chat.example.com" {
+			t.Errorf("path %q redirects to host %q (Location %q)", path, loc.Host, rec.Header().Get("Location"))
+		}
 	}
 }

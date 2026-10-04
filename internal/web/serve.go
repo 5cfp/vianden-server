@@ -155,6 +155,7 @@ func redirectToHTTPS(domain string, handler http.Handler) http.Handler {
 			handler.ServeHTTP(w, r)
 			return
 		}
+		// #nosec G710 -- the host is always the configured domain; only the path comes from the request.
 		http.Redirect(w, r, "https://"+domain+r.URL.RequestURI(), http.StatusPermanentRedirect)
 	})
 }

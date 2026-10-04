@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
@@ -185,11 +186,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	dec.DisallowUnknownFields()
 
 	if err := dec.Decode(dst); err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			return errBadRequest{"request body is too large"}
-		}
-		return errBadRequest{fmt.Sprintf("invalid JSON body: %v", err)}
+		return errBadRequest{jsonErrorMessage(err)}
 	}
 	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return errBadRequest{"request body must contain a single JSON object"}
@@ -215,3 +212,37 @@ func (noRealtime) Serve(w http.ResponseWriter, _ *http.Request, _ accounts.Sessi
 }
 func (noRealtime) Broadcast(string, any) {}
 func (noRealtime) EndSession(int64)      {}
+
+// jsonErrorMessage turns a JSON decoding error into a message for the client. Go's own
+// messages mention internal type names (e.g. "Go struct field registerRequest.username"),
+// which tell an attacker about the code; these say only what the client needs to fix.
+func jsonErrorMessage(err error) string {
+	var tooBig *http.MaxBytesError
+	var syntax *json.SyntaxError
+	var wrongType *json.UnmarshalTypeError
+	switch {
+	case errors.As(err, &tooBig):
+		return "request body is too large"
+	case errors.Is(err, io.EOF):
+		return "request body is empty"
+	case errors.As(err, &syntax), errors.Is(err, io.ErrUnexpectedEOF):
+		return "request body is not valid JSON"
+	case errors.As(err, &wrongType):
+		return fmt.Sprintf("field %q has the wrong type", wrongType.Field)
+	case strings.HasPrefix(err.Error(), "json: unknown field "):
+		// The field name comes from the client's own request, so repeating it is safe.
+		return "unknown field " + strings.TrimPrefix(err.Error(), "json: unknown field ")
+	default:
+		return "request body is not valid JSON"
+	}
+}
+
+// forLog shortens client-provided text before logging it, so a huge value cannot fill
+// the log (the body may be up to 64 KiB). slog already escapes line breaks and quotes.
+func forLog(s string) string {
+	const maxRunes = 64
+	if r := []rune(s); len(r) > maxRunes {
+		return string(r[:maxRunes]) + "…"
+	}
+	return s
+}

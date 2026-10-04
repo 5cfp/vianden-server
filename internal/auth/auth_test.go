@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -31,7 +32,8 @@ func TestHashAndVerifyPassword(t *testing.T) {
 
 func TestSamePasswordGetsDifferentHashes(t *testing.T) {
 	// Thanks to the random salt, two users with the same password have different hashes.
-	if HashPassword("summer2026") == HashPassword("summer2026") {
+	first, second := HashPassword("summer2026"), HashPassword("summer2026")
+	if first == second {
 		t.Error("two hashes of the same password are identical: salt is not random")
 	}
 }
@@ -113,5 +115,46 @@ func TestHashTokenIsDeterministic(t *testing.T) {
 func BenchmarkHashPassword(b *testing.B) {
 	for b.Loop() {
 		HashPassword("benchmark password")
+	}
+}
+
+func TestAtMostFourHashesRunAtOnce(t *testing.T) {
+	// Fill all slots, then check that a fifth hash has to wait for a free one.
+	for range maxConcurrentHashes {
+		hashSlots <- struct{}{}
+	}
+	done := make(chan struct{})
+	go func() {
+		HashPassword("waits for a slot")
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("a hash ran although all slots were taken")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	<-hashSlots // free one slot
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the waiting hash did not run after a slot was freed")
+	}
+	for range maxConcurrentHashes - 1 {
+		<-hashSlots
+	}
+}
+
+func TestStoredHashLengthsAreBounded(t *testing.T) {
+	salt16 := b64.EncodeToString(make([]byte, 16))
+	for name, h := range map[string]string{
+		"tiny salt": "$argon2id$v=19$m=65536,t=3,p=4$" + b64.EncodeToString(make([]byte, 4)) + "$" + b64.EncodeToString(make([]byte, 32)),
+		"tiny key":  "$argon2id$v=19$m=65536,t=3,p=4$" + salt16 + "$" + b64.EncodeToString(make([]byte, 8)),
+		"huge key":  "$argon2id$v=19$m=65536,t=3,p=4$" + salt16 + "$" + b64.EncodeToString(make([]byte, 100000)),
+	} {
+		if _, err := VerifyPassword("pw", h); !errors.Is(err, ErrInvalidHash) {
+			t.Errorf("%s: err = %v, want ErrInvalidHash", name, err)
+		}
 	}
 }

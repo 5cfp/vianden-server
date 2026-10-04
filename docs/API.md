@@ -82,7 +82,7 @@ Every error response (any 4xx or 5xx status) has this body:
 ### Error codes
 | Code | HTTP status | Meaning |
 |---|---|---|
-| `invalid_request` | 400 | The body is not valid JSON, has unknown fields, has the wrong types, contains more than one JSON value, or is larger than 64 KiB. |
+| `invalid_request` | 400 | The body is empty or not valid JSON, has unknown fields or wrong types, contains more than one JSON value, or is larger than 64 KiB. The message says which (e.g. `field "username" has the wrong type`). |
 | `invalid_username` | 400 | Username breaks the [username rules](#account-rules). |
 | `invalid_display_name` | 400 | Display name breaks the [display name rules](#account-rules). |
 | `invalid_password` | 400 | Password breaks the [password rules](#account-rules). |
@@ -518,6 +518,7 @@ Clients must **ignore unknown `type` values** (newer servers may add events).
 ### Keepalive and limits
 - The server sends a WebSocket **ping every 30 seconds**. A connection that does not answer within 10 seconds is closed. Standard WebSocket libraries answer pings automatically.
 - Client messages may be at most **4096 bytes**; a bigger one closes the connection with code `1009`.
+- Clients may send at most **10 messages per second** on average (short bursts of up to 20 are fine). More closes the connection with code `1008`.
 - If a client reads events too slowly (more than 64 waiting), the server closes it with code `4008`.
 
 ### Close codes
@@ -526,6 +527,7 @@ Clients must **ignore unknown `type` values** (newer servers may add events).
 | `1000` | Normal close | Nothing (reconnect if it was not you who closed it). |
 | `1001` | Server shutting down | Reconnect with backoff. |
 | `1009` | Your message was too big | Fix the client; reconnect. |
+| `1008` | You sent too many messages too fast | Fix the client; reconnect with backoff. |
 | `4001` | Session ended (logged out or revoked) | **Do not reconnect.** Delete the token and show the login screen. |
 | `4008` | Too slow reading events | Reconnect, then reload what you show (you missed events). |
 | other / no code | Network problem | Reconnect with backoff. |
@@ -580,7 +582,7 @@ Someone is typing in a channel. Show it for about **5 seconds**; repeated events
 ### Client → server events
 
 #### `typing`
-Send while the user is typing in a channel, **at most every 3 seconds**. The server forwards it to everyone else as `typing.started` (at most once every 2 seconds per user and channel; extra ones are dropped).
+Send while the user is typing in a channel, **at most every 3 seconds**. The server forwards it to everyone else as `typing.started`: at most once every 2 seconds per channel, and at most once per second per connection overall. Extra ones are dropped.
 ```json
 { "type": "typing", "data": { "channel_id": 1 } }
 ```
@@ -607,7 +609,7 @@ Unknown or malformed client messages are ignored.
 |---|---|
 | `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
 | `POST /channels/{id}/messages` | 10 messages at once, then 1 more per second, **per user** |
-| `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes; `typing` forwarded at most every 2 s per user and channel |
+| `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes and 10 per second (bursts of 20); `typing` forwarded at most every 2 s per channel and 1 s overall |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
 
@@ -625,3 +627,4 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added channels (`GET`, `POST /api/v1/channels`, `PATCH`, `DELETE /api/v1/channels/{id}`) and messages (`GET`, `POST /api/v1/channels/{id}/messages`) with keyset pagination.
 - Added the WebSocket at `GET /api/v1/ws` with events `ready`, `presence.updated`, `message.created`, `channel.created`, `channel.updated`, `channel.deleted`, `typing.started` (server to client) and `typing` (client to server).
 - All responses now send `Cache-Control: no-store`; request bodies are limited to 64 KiB and parsed strictly.
+- WebSocket: clients sending more than 10 messages per second are closed with `1008`; `typing` is also limited per connection. `invalid_request` messages no longer include internal details.

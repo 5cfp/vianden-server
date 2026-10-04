@@ -89,7 +89,7 @@ func handleLogin(svc Accounts, logger *slog.Logger) http.HandlerFunc {
 		case errors.Is(err, accounts.ErrInvalidCredentials):
 			// Logged so the owner can spot password guessing. slog escapes the values,
 			// so a username with line breaks cannot forge fake log lines.
-			logger.Warn("failed login", "username", req.Username, "ip", clientIP(r))
+			logger.Warn("failed login", "username", forLog(req.Username), "ip", clientIP(r))
 			writeError(w, http.StatusUnauthorized, "invalid_credentials", err.Error())
 		default:
 			logger.Error("login failed", "error", err)

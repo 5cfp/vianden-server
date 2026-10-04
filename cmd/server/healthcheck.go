@@ -30,6 +30,7 @@ func healthcheck() int {
 		url = "http://" + loopback(cfg.HTTPAddr) + "/api/v1/health"
 	case config.TLSSelfSigned:
 		// The certificate is not verified here: this request never leaves the machine.
+		// #nosec G402 -- loopback-only request to this same server; nothing to verify against.
 		client.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 		url = "https://" + loopback(cfg.HTTPSAddr) + "/api/v1/health"
 	default:

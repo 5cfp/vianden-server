@@ -159,9 +159,13 @@ Test from **outside** your network (for example a phone on mobile data) at least
 cd vianden-server
 git pull
 cd deploy
-docker compose up -d --build
+docker compose pull            # newer PostgreSQL images (security fixes)
+docker compose up -d --build    # rebuilds the server, restarts what changed
+docker image prune -f           # removes old, unused images
 ```
 Database changes ("migrations") are applied automatically when the new version starts. Make sure a recent backup exists first (see below).
+
+Do this regularly (for example monthly), even without a new Vianden version: `docker compose pull` is how the database gets its security updates.
 
 ### Logs and status
 ```bash
