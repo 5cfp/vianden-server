@@ -436,7 +436,9 @@ Managers can only change or delete channels they can see themselves, and cannot 
 | `author` | object or null | `id`, `username`, `display_name` of the sender; `null` if the account was deleted. |
 | `content` | string | The text. Display it as plain text, never as markup. |
 | `created_at` | string | Send time, RFC 3339 in UTC. |
-| `deleted` | boolean | `true` if a moderator deleted it. Then `content` is `""` (the text is erased on the server, not hidden); show a placeholder such as "Message deleted". `author` stays, so the conversation still makes sense. |
+| `deleted` | boolean | `true` if its author or a moderator deleted it. Then `content` is `""` (the text is erased on the server, not hidden); show a placeholder such as "Message deleted". `author` stays, so the conversation still makes sense. |
+| `edited_at` | string or null | When the author last edited the text (RFC 3339, UTC); `null` if never edited. Show a small "(edited)" mark. |
+| `reply_to` | object or null | If this message is a **reply**: a short quote of the message it answers, with `id`, `author` (as above; `null` if that account was deleted), `content` (at most 100 characters, then `…`; `""` if the original was deleted), and `deleted` (boolean). Show it above the message; the `id` lets the client jump to the original. `null` for normal messages. When the original is later edited or deleted, the stored reply is not changed, but clients receive [`message.updated`](#messageupdated) / [`message.deleted`](#messagedeleted) for the original and can update quotes they show. |
 
 ### `GET /api/v1/channels`
 Lists all channels in room-list order, each with a preview of its newest message.
@@ -500,9 +502,13 @@ Returns one page of a channel's history, **oldest first** within the page.
 {
   "messages": [
     { "id": 41, "channel_id": 1, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
-      "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z" },
+      "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z",
+      "deleted": false, "edited_at": null, "reply_to": null },
     { "id": 42, "channel_id": 1, "author": { "id": 1, "username": "osama", "display_name": "Osama" },
-      "content": "In 20 minutes.", "created_at": "2026-10-04T18:43:00Z" }
+      "content": "In 20 minutes.", "created_at": "2026-10-04T18:43:00Z",
+      "deleted": false, "edited_at": "2026-10-04T18:44:00Z",
+      "reply_to": { "id": 41, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
+                    "content": "Anyone up for a round tonight?", "deleted": false } }
   ],
   "has_more": true
 }
@@ -521,16 +527,24 @@ curl "http://127.0.0.1:8080/api/v1/channels/1/messages?limit=50" -H "Authorizati
 Sends a message as the logged-in user.
 
 - **Auth:** session token
-- **Request body:** `{ "content": "Hello!" }`
+- **Request body:** `{ "content": "Hello!" }`, or for a reply `{ "content": "Agreed!", "reply_to": 42 }`. `reply_to` (optional) is the id of a message **in the same channel** that is not deleted; otherwise the request fails with `invalid_reply_to`. (A reply cannot quote a message from another channel: that could show text from a channel the readers cannot see.)
 - **Response `201 Created`:** `{ "message": <message object> }`
-- **Errors:** `invalid_request` (400), `invalid_content` (400), `unauthorized` (401), `not_found` (404), `rate_limited` (429).
+- **Errors:** `invalid_request` (400), `invalid_content` (400), `invalid_reply_to` (400), `unauthorized` (401), `read_only` (403), `not_found` (404), `rate_limited` (429).
 - **Rate limited** per user (see [Rate limits](#rate-limits)).
 - Every connected client (including the sender's other devices) also receives the new message as a [`message.created`](#messagecreated) WebSocket event.
 
-### `DELETE /api/v1/channels/{id}/messages/{mid}`
-Deletes someone's message: its text is erased in the database and a placeholder stays (`deleted: true`). Deleting your own messages comes in a later version.
+### `PATCH /api/v1/channels/{id}/messages/{mid}`
+Edits the text of one of **your own** messages. Nobody can edit someone else's message, not even the owner.
 
-- **Auth:** session token; permission `delete_messages`, and the message's author must be **below your role** (messages of deleted accounts can always be removed). You must be able to see the channel.
+- **Auth:** session token; you must be the author, and you must still be allowed to write in the channel (`send_role`).
+- **Request body:** `{ "content": "Fixed the typo" }` (same rules as sending).
+- **Response `200 OK`:** `{ "message": <message object> }` with `edited_at` set. Everyone who can see the channel receives [`message.updated`](#messageupdated).
+- **Errors:** `invalid_request` (400), `invalid_content` (400), `unauthorized` (401), `forbidden` (403: not your message), `read_only` (403), `not_found` (404: unknown or deleted message, or a channel you cannot see), `rate_limited` (429, shared with sending).
+
+### `DELETE /api/v1/channels/{id}/messages/{mid}`
+Deletes a message: its text is erased in the database and a placeholder stays (`deleted: true`).
+
+- **Auth:** session token. **Your own messages:** always (even in a channel that became read-only for you). **Someone else's:** permission `delete_messages`, and the author must be **below your role** (messages of deleted accounts can always be removed). You must be able to see the channel.
 - **Response `204 No Content`.** Everyone who can see the channel receives [`message.deleted`](#messagedeleted).
 - **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404: unknown or already deleted message, or a channel you cannot see).
 
@@ -655,7 +669,8 @@ A new message in any channel. `data` is a [message object](#message-object). The
 { "type": "message.created", "data": {
     "id": 43, "channel_id": 1,
     "author": { "id": 2, "username": "sara", "display_name": "Sara" },
-    "content": "On my way!", "created_at": "2026-10-04T18:44:00Z" } }
+    "content": "On my way!", "created_at": "2026-10-04T18:44:00Z",
+    "deleted": false, "edited_at": null, "reply_to": null } }
 ```
 
 #### `channel.created`, `channel.updated`, `channel.deleted`
@@ -664,8 +679,16 @@ A manager created, changed, or deleted a channel. These events (and `message.cre
 { "type": "channel.deleted", "data": { "id": 3 } }
 ```
 
+#### `message.updated`
+A message was edited by its author. `data` is the full [message object](#message-object) (with `edited_at`): replace your copy.
+```json
+{ "type": "message.updated", "data": { "id": 43, "channel_id": 1, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
+    "content": "Fixed the typo", "created_at": "2026-10-04T18:30:00Z", "deleted": false,
+    "edited_at": "2026-10-04T18:31:00Z", "reply_to": null } }
+```
+
 #### `message.deleted`
-A message was deleted by a moderator. Replace it with a placeholder (or remove it).
+A message was deleted by its author or a moderator. Replace it with a placeholder (or remove it).
 ```json
 { "type": "message.deleted", "data": { "id": 43, "channel_id": 1 } }
 ```
@@ -712,7 +735,7 @@ Unknown or malformed client messages are ignored.
 | Endpoints | Limit |
 |---|---|
 | `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
-| `POST /channels/{id}/messages` | 10 messages at once, then 1 more per second, **per user** |
+| `POST /channels/{id}/messages` and `PATCH /channels/{id}/messages/{mid}` (shared) | 10 messages at once, then 1 more per second, **per user** |
 | `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes and 10 per second (bursts of 20); `typing` forwarded at most every 2 s per channel and 1 s overall |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
@@ -736,3 +759,4 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added members: `GET /api/v1/users`, `PATCH /api/v1/users/{id}` (role), `POST /api/v1/users/{id}/kick`, `POST`/`DELETE /api/v1/users/{id}/ban`; WebSocket event `member.updated`; login error `account_banned`.
 - Added per-channel `view_role` and `send_role` (channel object, create, update); hidden channels answer 404; new error `read_only`; live events are only sent to users who may see the channel.
 - Added `DELETE /api/v1/channels/{id}/messages/{mid}`, the message field `deleted`, and the WebSocket event `message.deleted`. Room-list previews skip deleted messages.
+- Added replies (`reply_to` in the send request and in message objects), message editing (`PATCH /api/v1/channels/{id}/messages/{mid}`, field `edited_at`, WebSocket event `message.updated`), and deleting your own messages. New error `invalid_reply_to`.

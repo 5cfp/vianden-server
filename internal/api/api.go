@@ -92,9 +92,11 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Realtime, d.Logger)))
 	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Realtime, d.Logger)))
 	mux.HandleFunc("GET /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, handleListMessages(d.Chat, d.Logger)))
-	// Sending: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
+	// Sending and editing: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
 	sendLimit := newIPRateLimiter(60, 10)
 	mux.HandleFunc("POST /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleSendMessage(d.Chat, d.Realtime, d.Logger))))
+	// Edits share the same limit (an edit is a new text, like a message).
+	mux.HandleFunc("PATCH /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleEditMessage(d.Chat, d.Realtime, d.Logger))))
 	mux.HandleFunc("DELETE /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, handleDeleteMessage(d.Chat, d.Realtime, d.Logger)))
 
 	// Members: list (any logged-in user), role changes, kick, ban (checked in the service).

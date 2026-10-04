@@ -72,7 +72,20 @@ type Message struct {
 	Author    *Author
 	Content   string
 	CreatedAt time.Time
-	// Deleted: removed by a moderator. Content is then "" (the text is erased in the database).
+	// Deleted: removed by its author or a moderator. Content is then "" (the text is
+	// erased in the database).
+	Deleted bool
+	// EditedAt: when the author last changed the text; nil if never.
+	EditedAt *time.Time
+	// ReplyTo: the message this one answers (a short quote); nil if it is not a reply.
+	ReplyTo *ReplyPreview
+}
+
+// ReplyPreview is the quote shown above a reply.
+type ReplyPreview struct {
+	ID      int64
+	Author  *Author // nil if the account no longer exists
+	Content string  // at most 100 characters; "" if the original was deleted
 	Deleted bool
 }
 
@@ -243,8 +256,9 @@ func (s *Service) DeleteChannel(ctx context.Context, by accounts.User, id int64)
 	return c, nil
 }
 
-// SendMessage posts a message to a channel as the given user.
-func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (Message, Channel, error) {
+// SendMessage posts a message to a channel as the given user. replyTo is the id of the
+// message it answers, or 0 for a normal message.
+func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64) (Message, Channel, error) {
 	content, err := cleanMessage(content)
 	if err != nil {
 		return Message{}, Channel{}, err
@@ -257,7 +271,22 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 		return Message{}, Channel{}, ErrReadOnly
 	}
 
-	m, err := s.queries.CreateMessage(ctx, db.CreateMessageParams{ChannelID: channelID, AuthorID: &by.ID, Content: content})
+	params := db.CreateMessageParams{ChannelID: channelID, AuthorID: &by.ID, Content: content}
+	if replyTo != 0 {
+		// The original must be in THIS channel. Otherwise someone could reply "into" a
+		// channel they can see while quoting a message from one they cannot, and the quote
+		// would leak its text to everyone here.
+		ok, err := s.queries.MessageExists(ctx, db.MessageExistsParams{ID: replyTo, ChannelID: channelID})
+		if err != nil {
+			return Message{}, Channel{}, err
+		}
+		if !ok {
+			return Message{}, Channel{}, &accounts.ValidationError{Field: "reply_to", Message: "no such message in this channel"}
+		}
+		params.ReplyToID = &replyTo
+	}
+
+	id, err := s.queries.CreateMessage(ctx, params)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation: deleted meanwhile
@@ -265,10 +294,78 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 		}
 		return Message{}, Channel{}, err
 	}
-	return Message{
-		ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt,
-		Author: &Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName},
-	}, c, nil
+	m, err := s.getMessage(ctx, channelID, id)
+	return m, c, err
+}
+
+// EditMessage changes the text of one of the user's OWN messages (nobody can edit
+// someone else's words, not even the owner). Like sending, it needs write access to the
+// channel. Returns the updated message and its channel (for the live event).
+func (s *Service) EditMessage(ctx context.Context, by accounts.User, channelID, messageID int64, content string) (Message, Channel, error) {
+	content, err := cleanMessage(content)
+	if err != nil {
+		return Message{}, Channel{}, err
+	}
+	c, err := s.Channel(ctx, by, channelID)
+	if err != nil {
+		return Message{}, Channel{}, err
+	}
+	if !c.CanSend(by.Role) {
+		return Message{}, Channel{}, ErrReadOnly
+	}
+	current, err := s.getMessage(ctx, channelID, messageID)
+	if err != nil {
+		return Message{}, Channel{}, err
+	}
+	if current.Deleted {
+		return Message{}, Channel{}, ErrMessageNotFound
+	}
+	if current.Author == nil || current.Author.ID != by.ID {
+		return Message{}, Channel{}, accounts.ErrForbidden
+	}
+
+	n, err := s.queries.EditMessage(ctx, db.EditMessageParams{ID: messageID, AuthorID: &by.ID, Content: content})
+	if err != nil {
+		return Message{}, Channel{}, err
+	}
+	if n == 0 {
+		return Message{}, Channel{}, ErrMessageNotFound // deleted meanwhile
+	}
+	m, err := s.getMessage(ctx, channelID, messageID)
+	return m, c, err
+}
+
+// getMessage loads one message (also deleted ones) of a channel.
+func (s *Service) getMessage(ctx context.Context, channelID, messageID int64) (Message, error) {
+	row, err := s.queries.GetMessage(ctx, db.GetMessageParams{ID: messageID, ChannelID: channelID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, err
+	}
+	// GetMessageRow and ListMessagesRow have exactly the same fields (the queries select
+	// the same columns), so Go allows converting one struct type into the other.
+	return toMessage(db.ListMessagesRow(row)), nil
+}
+
+// toMessage turns a database row into a Message, including the reply quote.
+func toMessage(r db.ListMessagesRow) Message {
+	m := Message{
+		ID: r.ID, ChannelID: r.ChannelID, Content: r.Content, CreatedAt: r.CreatedAt,
+		Deleted: r.Deleted, EditedAt: r.EditedAt,
+	}
+	if r.AuthorID != nil && r.AuthorUsername != nil && r.AuthorDisplayName != nil {
+		m.Author = &Author{ID: *r.AuthorID, Username: *r.AuthorUsername, DisplayName: *r.AuthorDisplayName}
+	}
+	if r.ReplyToID != nil && r.ReplyContent != nil { // ReplyContent is NULL only if the original row is gone
+		q := &ReplyPreview{ID: *r.ReplyToID, Content: truncate(*r.ReplyContent, previewLength), Deleted: r.ReplyDeleted}
+		if r.ReplyAuthorID != nil && r.ReplyAuthorUsername != nil && r.ReplyAuthorDisplayName != nil {
+			q.Author = &Author{ID: *r.ReplyAuthorID, Username: *r.ReplyAuthorUsername, DisplayName: *r.ReplyAuthorDisplayName}
+		}
+		m.ReplyTo = q
+	}
+	return m
 }
 
 // ListMessages returns one page of a channel's history in chronological order (oldest first).
@@ -304,11 +401,7 @@ func (s *Service) ListMessages(ctx context.Context, viewer accounts.User, channe
 	// The query returns newest first; the client wants oldest first.
 	msgs = make([]Message, len(rows))
 	for i, r := range rows {
-		m := Message{ID: r.ID, ChannelID: r.ChannelID, Content: r.Content, CreatedAt: r.CreatedAt, Deleted: r.Deleted}
-		if r.AuthorID != nil && r.AuthorUsername != nil && r.AuthorDisplayName != nil {
-			m.Author = &Author{ID: *r.AuthorID, Username: *r.AuthorUsername, DisplayName: *r.AuthorDisplayName}
-		}
-		msgs[len(rows)-1-i] = m
+		msgs[len(rows)-1-i] = toMessage(r)
 	}
 	return msgs, hasMore, nil
 }
@@ -419,9 +512,10 @@ func truncate(s string, maxRunes int) string {
 }
 
 // DeleteMessage erases a message's text (for real, in the database) and leaves a
-// "message deleted" placeholder. Needs the delete_messages permission, and the author must
-// be below you (a moderator cannot delete an admin's message). Messages of deleted accounts
-// can always be removed by someone with the permission.
+// "message deleted" placeholder. Everyone may delete their OWN messages. Deleting someone
+// else's needs the delete_messages permission, and the author must be below you (a
+// moderator cannot delete an admin's message). Messages of deleted accounts can always be
+// removed by someone with the permission.
 // Returns the channel, so the caller can tell exactly the users who can see it.
 func (s *Service) DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (Channel, error) {
 	c, err := s.Channel(ctx, by, channelID) // only in channels you can see
@@ -440,7 +534,8 @@ func (s *Service) DeleteMessage(ctx context.Context, by accounts.User, channelID
 	if m.AuthorRole != nil {
 		authorRole = perm.Role(*m.AuthorRole)
 	}
-	if !perm.CanActOn(by.Role, perm.DeleteMessages, authorRole) {
+	own := m.AuthorID != nil && *m.AuthorID == by.ID
+	if !own && !perm.CanActOn(by.Role, perm.DeleteMessages, authorRole) {
 		return Channel{}, accounts.ErrForbidden
 	}
 

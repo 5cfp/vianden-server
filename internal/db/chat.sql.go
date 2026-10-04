@@ -46,34 +46,28 @@ func (q *Queries) CreateChannel(ctx context.Context, arg CreateChannelParams) (C
 }
 
 const createMessage = `-- name: CreateMessage :one
-INSERT INTO messages (channel_id, author_id, content)
-VALUES ($1, $2, $3)
-RETURNING id, channel_id, content, created_at
+INSERT INTO messages (channel_id, author_id, content, reply_to_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id
 `
 
 type CreateMessageParams struct {
 	ChannelID int64
 	AuthorID  *int64
 	Content   string
+	ReplyToID *int64
 }
 
-type CreateMessageRow struct {
-	ID        int64
-	ChannelID int64
-	Content   string
-	CreatedAt time.Time
-}
-
-func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (CreateMessageRow, error) {
-	row := q.db.QueryRow(ctx, createMessage, arg.ChannelID, arg.AuthorID, arg.Content)
-	var i CreateMessageRow
-	err := row.Scan(
-		&i.ID,
-		&i.ChannelID,
-		&i.Content,
-		&i.CreatedAt,
+func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (int64, error) {
+	row := q.db.QueryRow(ctx, createMessage,
+		arg.ChannelID,
+		arg.AuthorID,
+		arg.Content,
+		arg.ReplyToID,
 	)
-	return i, err
+	var id int64
+	err := row.Scan(&id)
+	return id, err
 }
 
 const deleteChannel = `-- name: DeleteChannel :execrows
@@ -107,6 +101,26 @@ func (q *Queries) DeleteMessage(ctx context.Context, arg DeleteMessageParams) (i
 	return result.RowsAffected(), nil
 }
 
+const editMessage = `-- name: EditMessage :execrows
+UPDATE messages SET content = $3, edited_at = now()
+WHERE id = $1 AND author_id = $2 AND deleted_at IS NULL
+`
+
+type EditMessageParams struct {
+	ID       int64
+	AuthorID *int64
+	Content  string
+}
+
+// Only the author can edit, and only a live message.
+func (q *Queries) EditMessage(ctx context.Context, arg EditMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, editMessage, arg.ID, arg.AuthorID, arg.Content)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getChannel = `-- name: GetChannel :one
 SELECT id, name, topic, type, position, created_at, view_role, send_role FROM channels WHERE id = $1
 `
@@ -123,6 +137,72 @@ func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
 		&i.CreatedAt,
 		&i.ViewRole,
 		&i.SendRole,
+	)
+	return i, err
+}
+
+const getMessage = `-- name: GetMessage :one
+SELECT
+    m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    u.username     AS author_username,
+    u.display_name AS author_display_name,
+    m.reply_to_id,
+    r.content      AS reply_content,
+    (r.deleted_at IS NOT NULL)::boolean AS reply_deleted,
+    r.author_id    AS reply_author_id,
+    ru.username     AS reply_author_username,
+    ru.display_name AS reply_author_display_name
+FROM messages m
+LEFT JOIN users u ON u.id = m.author_id
+LEFT JOIN messages r ON r.id = m.reply_to_id
+LEFT JOIN users ru ON ru.id = r.author_id
+WHERE m.id = $1 AND m.channel_id = $2
+`
+
+type GetMessageParams struct {
+	ID        int64
+	ChannelID int64
+}
+
+type GetMessageRow struct {
+	ID                     int64
+	ChannelID              int64
+	Content                string
+	CreatedAt              time.Time
+	EditedAt               *time.Time
+	AuthorID               *int64
+	Deleted                bool
+	AuthorUsername         *string
+	AuthorDisplayName      *string
+	ReplyToID              *int64
+	ReplyContent           *string
+	ReplyDeleted           bool
+	ReplyAuthorID          *int64
+	ReplyAuthorUsername    *string
+	ReplyAuthorDisplayName *string
+}
+
+// One message in the same shape as ListMessages.
+func (q *Queries) GetMessage(ctx context.Context, arg GetMessageParams) (GetMessageRow, error) {
+	row := q.db.QueryRow(ctx, getMessage, arg.ID, arg.ChannelID)
+	var i GetMessageRow
+	err := row.Scan(
+		&i.ID,
+		&i.ChannelID,
+		&i.Content,
+		&i.CreatedAt,
+		&i.EditedAt,
+		&i.AuthorID,
+		&i.Deleted,
+		&i.AuthorUsername,
+		&i.AuthorDisplayName,
+		&i.ReplyToID,
+		&i.ReplyContent,
+		&i.ReplyDeleted,
+		&i.ReplyAuthorID,
+		&i.ReplyAuthorUsername,
+		&i.ReplyAuthorDisplayName,
 	)
 	return i, err
 }
@@ -229,11 +309,20 @@ func (q *Queries) ListChannels(ctx context.Context) ([]ListChannelsRow, error) {
 
 const listMessages = `-- name: ListMessages :many
 SELECT
-    m.id, m.channel_id, m.content, m.created_at, m.author_id, (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted,
     u.username     AS author_username,
-    u.display_name AS author_display_name
+    u.display_name AS author_display_name,
+    m.reply_to_id,
+    r.content      AS reply_content,
+    (r.deleted_at IS NOT NULL)::boolean AS reply_deleted,
+    r.author_id    AS reply_author_id,
+    ru.username     AS reply_author_username,
+    ru.display_name AS reply_author_display_name
 FROM messages m
 LEFT JOIN users u ON u.id = m.author_id
+LEFT JOIN messages r ON r.id = m.reply_to_id
+LEFT JOIN users ru ON ru.id = r.author_id
 WHERE m.channel_id = $1
   AND ($2::bigint IS NULL OR m.id < $2::bigint)
 ORDER BY m.id DESC
@@ -247,18 +336,27 @@ type ListMessagesParams struct {
 }
 
 type ListMessagesRow struct {
-	ID                int64
-	ChannelID         int64
-	Content           string
-	CreatedAt         time.Time
-	AuthorID          *int64
-	Deleted           bool
-	AuthorUsername    *string
-	AuthorDisplayName *string
+	ID                     int64
+	ChannelID              int64
+	Content                string
+	CreatedAt              time.Time
+	EditedAt               *time.Time
+	AuthorID               *int64
+	Deleted                bool
+	AuthorUsername         *string
+	AuthorDisplayName      *string
+	ReplyToID              *int64
+	ReplyContent           *string
+	ReplyDeleted           bool
+	ReplyAuthorID          *int64
+	ReplyAuthorUsername    *string
+	ReplyAuthorDisplayName *string
 }
 
 // One page of history, NEWEST first. "before" is the id of the oldest message the
 // client already has (NULL for the newest page). Keyset pagination: see docs.
+// r / ru = the message this one replies to, and its author (all NULL if not a reply).
+// Keep the column list identical to GetMessage (the Go code converts between the two).
 func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]ListMessagesRow, error) {
 	rows, err := q.db.Query(ctx, listMessages, arg.ChannelID, arg.Before, arg.RowLimit)
 	if err != nil {
@@ -273,10 +371,17 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 			&i.ChannelID,
 			&i.Content,
 			&i.CreatedAt,
+			&i.EditedAt,
 			&i.AuthorID,
 			&i.Deleted,
 			&i.AuthorUsername,
 			&i.AuthorDisplayName,
+			&i.ReplyToID,
+			&i.ReplyContent,
+			&i.ReplyDeleted,
+			&i.ReplyAuthorID,
+			&i.ReplyAuthorUsername,
+			&i.ReplyAuthorDisplayName,
 		); err != nil {
 			return nil, err
 		}
@@ -286,6 +391,25 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 		return nil, err
 	}
 	return items, nil
+}
+
+const messageExists = `-- name: MessageExists :one
+SELECT EXISTS (
+    SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2 AND deleted_at IS NULL
+)
+`
+
+type MessageExistsParams struct {
+	ID        int64
+	ChannelID int64
+}
+
+// Is there a live (not deleted) message with this id in this channel? (reply targets)
+func (q *Queries) MessageExists(ctx context.Context, arg MessageExistsParams) (bool, error) {
+	row := q.db.QueryRow(ctx, messageExists, arg.ID, arg.ChannelID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const updateChannel = `-- name: UpdateChannel :one

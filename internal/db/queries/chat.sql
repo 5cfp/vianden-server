@@ -36,23 +36,64 @@ SELECT * FROM channels WHERE id = $1;
 DELETE FROM channels WHERE id = $1;
 
 -- name: CreateMessage :one
-INSERT INTO messages (channel_id, author_id, content)
-VALUES ($1, $2, $3)
-RETURNING id, channel_id, content, created_at;
+INSERT INTO messages (channel_id, author_id, content, reply_to_id)
+VALUES ($1, $2, $3, $4)
+RETURNING id;
 
 -- name: ListMessages :many
 -- One page of history, NEWEST first. "before" is the id of the oldest message the
 -- client already has (NULL for the newest page). Keyset pagination: see docs.
+-- r / ru = the message this one replies to, and its author (all NULL if not a reply).
+-- Keep the column list identical to GetMessage (the Go code converts between the two).
 SELECT
-    m.id, m.channel_id, m.content, m.created_at, m.author_id, (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted,
     u.username     AS author_username,
-    u.display_name AS author_display_name
+    u.display_name AS author_display_name,
+    m.reply_to_id,
+    r.content      AS reply_content,
+    (r.deleted_at IS NOT NULL)::boolean AS reply_deleted,
+    r.author_id    AS reply_author_id,
+    ru.username     AS reply_author_username,
+    ru.display_name AS reply_author_display_name
 FROM messages m
 LEFT JOIN users u ON u.id = m.author_id
+LEFT JOIN messages r ON r.id = m.reply_to_id
+LEFT JOIN users ru ON ru.id = r.author_id
 WHERE m.channel_id = sqlc.arg(channel_id)
   AND (sqlc.narg(before)::bigint IS NULL OR m.id < sqlc.narg(before)::bigint)
 ORDER BY m.id DESC
 LIMIT sqlc.arg(row_limit);
+
+-- name: GetMessage :one
+-- One message in the same shape as ListMessages.
+SELECT
+    m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    u.username     AS author_username,
+    u.display_name AS author_display_name,
+    m.reply_to_id,
+    r.content      AS reply_content,
+    (r.deleted_at IS NOT NULL)::boolean AS reply_deleted,
+    r.author_id    AS reply_author_id,
+    ru.username     AS reply_author_username,
+    ru.display_name AS reply_author_display_name
+FROM messages m
+LEFT JOIN users u ON u.id = m.author_id
+LEFT JOIN messages r ON r.id = m.reply_to_id
+LEFT JOIN users ru ON ru.id = r.author_id
+WHERE m.id = $1 AND m.channel_id = $2;
+
+-- name: MessageExists :one
+-- Is there a live (not deleted) message with this id in this channel? (reply targets)
+SELECT EXISTS (
+    SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2 AND deleted_at IS NULL
+);
+
+-- name: EditMessage :execrows
+-- Only the author can edit, and only a live message.
+UPDATE messages SET content = $3, edited_at = now()
+WHERE id = $1 AND author_id = $2 AND deleted_at IS NULL;
 
 -- name: GetMessageWithAuthor :one
 -- A live (not deleted) message in a channel, with its author's role (for the hierarchy rule).

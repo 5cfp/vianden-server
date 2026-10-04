@@ -32,6 +32,7 @@ type chatCall struct {
 	channelID   int64
 	name, topic *string
 	content     string
+	replyTo     int64
 	viewRole    perm.Role
 	sendRole    perm.Role
 	before      int64
@@ -84,13 +85,27 @@ func (f fakeChat) DeleteChannel(_ context.Context, by accounts.User, id int64) (
 	return chat.Channel{ID: id, ViewRole: f.channelView, SendRole: f.channelView}, f.err
 }
 
-func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string) (chat.Message, chat.Channel, error) {
-	f.record(chatCall{by: by, channelID: channelID, content: content})
+func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string, replyTo int64) (chat.Message, chat.Channel, error) {
+	f.record(chatCall{by: by, channelID: channelID, content: content, replyTo: replyTo})
 	if f.err != nil {
 		return chat.Message{}, chat.Channel{}, f.err
 	}
-	return chat.Message{ID: 10, ChannelID: channelID, Content: content, CreatedAt: when,
-		Author: &chat.Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName}}, chat.Channel{ID: channelID, ViewRole: f.channelView, SendRole: f.channelView}, nil
+	m := chat.Message{ID: 10, ChannelID: channelID, Content: content, CreatedAt: when,
+		Author: &chat.Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName}}
+	if replyTo != 0 {
+		m.ReplyTo = &chat.ReplyPreview{ID: replyTo, Content: "original", Author: &chat.Author{ID: 1, Username: "osama", DisplayName: "Osama"}}
+	}
+	return m, chat.Channel{ID: channelID, ViewRole: f.channelView, SendRole: f.channelView}, nil
+}
+
+func (f fakeChat) EditMessage(_ context.Context, by accounts.User, channelID, messageID int64, content string) (chat.Message, chat.Channel, error) {
+	f.record(chatCall{by: by, channelID: channelID, before: messageID, content: content})
+	if f.err != nil {
+		return chat.Message{}, chat.Channel{}, f.err
+	}
+	edited := when.Add(time.Minute)
+	return chat.Message{ID: messageID, ChannelID: channelID, Content: content, CreatedAt: when, EditedAt: &edited,
+		Author: &chat.Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName}}, chat.Channel{ID: channelID, ViewRole: or(f.channelView), SendRole: or(f.channelView)}, nil
 }
 
 func (f fakeChat) ListMessages(_ context.Context, _ accounts.User, channelID, before int64, limit int) ([]chat.Message, bool, error) {
@@ -204,7 +219,7 @@ func TestSendMessage(t *testing.T) {
 	if got.by.ID != member.ID || got.channelID != 4 || got.content != "hello" {
 		t.Errorf("call %+v: the message must be sent as the logged-in user", got)
 	}
-	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z","deleted":false}}` + "\n"
+	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null}}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -243,7 +258,7 @@ func TestListMessagesQuery(t *testing.T) {
 	if rec.Code != http.StatusOK || got.before != 42 || got.limit != 20 {
 		t.Fatalf("status %d, call %+v", rec.Code, got)
 	}
-	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z","deleted":false}],"has_more":true}` + "\n"
+	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null}],"has_more":true}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -313,5 +328,63 @@ func TestDeleteMessageErrors(t *testing.T) {
 	}
 	if rec := send(t, chatHandler(fakeChat{}), "DELETE", "/api/v1/channels/4/messages/abc", "Bearer vs_owner", ""); rec.Code != 404 {
 		t.Errorf("bad message id: %d", rec.Code)
+	}
+}
+
+func TestSendReply(t *testing.T) {
+	var got chatCall
+	rec := send(t, chatHandler(fakeChat{got: &got}), "POST", "/api/v1/channels/4/messages", "Bearer vs_member", `{"content":"agreed","reply_to":7}`)
+	if rec.Code != http.StatusCreated || got.replyTo != 7 {
+		t.Fatalf("status %d, call %+v", rec.Code, got)
+	}
+	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"agreed","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,` +
+		`"reply_to":{"id":7,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"original","deleted":false}}}` + "\n"
+	if rec.Body.String() != want {
+		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
+	}
+
+	// Without reply_to (or null) it is a normal message.
+	send(t, chatHandler(fakeChat{got: &got}), "POST", "/api/v1/channels/4/messages", "Bearer vs_member", `{"content":"hi","reply_to":null}`)
+	if got.replyTo != 0 {
+		t.Errorf("reply_to null gave %d", got.replyTo)
+	}
+}
+
+func TestEditMessage(t *testing.T) {
+	var got chatCall
+	rt := &fakeRealtime{}
+	h := realtimeHandler(rt, fakeChat{got: &got, channelView: perm.Admin})
+
+	rec := send(t, h, "PATCH", "/api/v1/channels/4/messages/77", "Bearer vs_owner", `{"content":"fixed typo"}`)
+	if rec.Code != http.StatusOK || got.channelID != 4 || got.before != 77 || got.content != "fixed typo" || got.by.ID != osama.ID {
+		t.Fatalf("status %d, call %+v", rec.Code, got)
+	}
+	want := `{"message":{"id":77,"channel_id":4,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"fixed typo","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":"2026-10-04T18:31:00Z","reply_to":null}}` + "\n"
+	if rec.Body.String() != want {
+		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
+	}
+	if rt.events[0] != "message.updated" || !reflect.DeepEqual(rt.audience(0), []perm.Role{perm.Owner, perm.Admin}) {
+		t.Errorf("event %v reached %v; want message.updated for admins and up", rt.events, rt.audience(0))
+	}
+}
+
+func TestEditMessageErrors(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code int
+		want string
+	}{
+		{accounts.ErrForbidden, http.StatusForbidden, "forbidden"},
+		{chat.ErrMessageNotFound, http.StatusNotFound, "not_found"},
+		{chat.ErrReadOnly, http.StatusForbidden, "read_only"},
+		{&accounts.ValidationError{Field: "content", Message: "x"}, http.StatusBadRequest, "invalid_content"},
+	} {
+		rec := send(t, chatHandler(fakeChat{err: c.err}), "PATCH", "/api/v1/channels/4/messages/7", "Bearer vs_member", `{"content":"x"}`)
+		if rec.Code != c.code || !strings.Contains(rec.Body.String(), `"code":"`+c.want+`"`) {
+			t.Errorf("%v: %d %s", c.err, rec.Code, rec.Body)
+		}
+	}
+	if rec := send(t, chatHandler(fakeChat{}), "PATCH", "/api/v1/channels/4/messages/7", "", `{"content":"x"}`); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: %d", rec.Code)
 	}
 }

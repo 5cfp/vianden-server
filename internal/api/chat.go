@@ -20,7 +20,8 @@ type Chat interface {
 	CreateChannel(ctx context.Context, by accounts.User, set chat.ChannelSettings) (chat.Channel, error)
 	UpdateChannel(ctx context.Context, by accounts.User, id int64, ch chat.ChannelChanges) (chat.Channel, perm.Role, error)
 	DeleteChannel(ctx context.Context, by accounts.User, id int64) (chat.Channel, error)
-	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (chat.Message, chat.Channel, error)
+	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64) (chat.Message, chat.Channel, error)
+	EditMessage(ctx context.Context, by accounts.User, channelID, messageID int64, content string) (chat.Message, chat.Channel, error)
 	ListMessages(ctx context.Context, viewer accounts.User, channelID, before int64, limit int) ([]chat.Message, bool, error)
 	DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (chat.Channel, error)
 }
@@ -54,8 +55,18 @@ type messageResponse struct {
 	Author    *authorResponse `json:"author"` // null if the account no longer exists
 	Content   string          `json:"content"`
 	CreatedAt time.Time       `json:"created_at"`
-	// Deleted by a moderator: content is "" and should be shown as "Message deleted".
-	Deleted bool `json:"deleted"`
+	// Deleted by its author or a moderator: content is "" and should be shown as "Message deleted".
+	Deleted  bool           `json:"deleted"`
+	EditedAt *time.Time     `json:"edited_at"` // null if never edited
+	ReplyTo  *replyResponse `json:"reply_to"`  // null if not a reply
+}
+
+// replyResponse is the quote of the message a reply answers.
+type replyResponse struct {
+	ID      int64           `json:"id"`
+	Author  *authorResponse `json:"author"`  // null if the account no longer exists
+	Content string          `json:"content"` // at most 100 characters (+ "…"); "" if deleted
+	Deleted bool            `json:"deleted"`
 }
 
 func toChannelResponse(c chat.Channel) channelResponse {
@@ -73,6 +84,16 @@ func toMessageResponse(m chat.Message) messageResponse {
 	r := messageResponse{ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt.UTC(), Deleted: m.Deleted}
 	if a := m.Author; a != nil {
 		r.Author = &authorResponse{ID: a.ID, Username: a.Username, DisplayName: a.DisplayName}
+	}
+	if m.EditedAt != nil {
+		t := m.EditedAt.UTC()
+		r.EditedAt = &t
+	}
+	if q := m.ReplyTo; q != nil {
+		r.ReplyTo = &replyResponse{ID: q.ID, Content: q.Content, Deleted: q.Deleted}
+		if a := q.Author; a != nil {
+			r.ReplyTo.Author = &authorResponse{ID: a.ID, Username: a.Username, DisplayName: a.DisplayName}
+		}
 	}
 	return r
 }
@@ -243,13 +264,14 @@ func handleSendMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler
 		}
 		var req struct {
 			Content string `json:"content"`
+			ReplyTo *int64 `json:"reply_to"` // optional: id of the message this answers
 		}
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		// Message text is never logged: it is private conversation.
-		m, ch, err := svc.SendMessage(r.Context(), s.User, id, req.Content)
+		m, ch, err := svc.SendMessage(r.Context(), s.User, id, req.Content, deref(req.ReplyTo))
 		if err != nil {
 			writeServiceError(w, logger, "send message", err)
 			return
@@ -298,5 +320,41 @@ func handleDeleteMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 		rt.BroadcastWhere("message.deleted", map[string]int64{"id": messageID, "channel_id": channelID}, ch.CanView)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// deref returns *p, or 0 for nil (an optional id that was not sent).
+func deref(p *int64) int64 {
+	if p == nil {
+		return 0
+	}
+	return *p
+}
+
+func handleEditMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
+		channelID, ok1 := pathID(r, "id")
+		messageID, ok2 := pathID(r, "mid")
+		if !ok1 || !ok2 {
+			writeError(w, http.StatusNotFound, "not_found", chat.ErrMessageNotFound.Error())
+			return
+		}
+		var req struct {
+			Content string `json:"content"`
+		}
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		m, ch, err := svc.EditMessage(r.Context(), s.User, channelID, messageID, req.Content)
+		if err != nil {
+			writeServiceError(w, logger, "edit message", err)
+			return
+		}
+		resp := toMessageResponse(m)
+		rt.BroadcastWhere("message.updated", resp, ch.CanView)
+		writeJSON(w, http.StatusOK, struct {
+			Message messageResponse `json:"message"`
+		}{resp})
 	}
 }

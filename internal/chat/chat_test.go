@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -163,8 +164,8 @@ func TestDeleteChannelDeletesItsMessages(t *testing.T) {
 	s, pool, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "Games")
 	keep := mustCreate(t, s, owner, "General")
-	s.SendMessage(ctx, member, c.ID, "bye")
-	s.SendMessage(ctx, member, keep.ID, "stays")
+	s.SendMessage(ctx, member, c.ID, "bye", 0)
+	s.SendMessage(ctx, member, keep.ID, "stays", 0)
 
 	if _, err := s.DeleteChannel(ctx, owner, c.ID); err != nil {
 		t.Fatal(err)
@@ -185,7 +186,7 @@ func TestSendMessage(t *testing.T) {
 	s, _, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
 
-	m, _, err := s.SendMessage(ctx, member, c.ID, "hello\r\nsecond line")
+	m, _, err := s.SendMessage(ctx, member, c.ID, "hello\r\nsecond line", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,10 +197,10 @@ func TestSendMessage(t *testing.T) {
 		t.Errorf("unexpected message %+v", m)
 	}
 
-	if _, _, err := s.SendMessage(ctx, member, c.ID, "مرحبا 👋\ttabs ok"); err != nil {
+	if _, _, err := s.SendMessage(ctx, member, c.ID, "مرحبا 👋\ttabs ok", 0); err != nil {
 		t.Errorf("unicode, emoji and tabs should be allowed: %v", err)
 	}
-	if _, _, err := s.SendMessage(ctx, member, c.ID, strings.Repeat("😀", 4000)); err != nil {
+	if _, _, err := s.SendMessage(ctx, member, c.ID, strings.Repeat("😀", 4000), 0); err != nil {
 		t.Errorf("4000 characters (emoji are 4 bytes each) should be allowed: %v", err)
 	}
 }
@@ -216,11 +217,11 @@ func TestSendMessageRules(t *testing.T) {
 		"null byte":    "nul\x00l",
 		"bad utf-8":    "bad\xff",
 	} {
-		if _, _, err := s.SendMessage(ctx, member, c.ID, content); validationField(err) != "content" {
+		if _, _, err := s.SendMessage(ctx, member, c.ID, content, 0); validationField(err) != "content" {
 			t.Errorf("%s: err = %v, want content validation error", label, err)
 		}
 	}
-	if _, _, err := s.SendMessage(ctx, member, 9999, "hi"); !errors.Is(err, ErrChannelNotFound) {
+	if _, _, err := s.SendMessage(ctx, member, 9999, "hi", 0); !errors.Is(err, ErrChannelNotFound) {
 		t.Errorf("unknown channel: %v", err)
 	}
 }
@@ -229,7 +230,7 @@ func TestHistoryPagination(t *testing.T) {
 	s, _, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
 	for i := 1; i <= 120; i++ {
-		if _, _, err := s.SendMessage(ctx, member, c.ID, fmt.Sprintf("msg %d", i)); err != nil {
+		if _, _, err := s.SendMessage(ctx, member, c.ID, fmt.Sprintf("msg %d", i), 0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -260,7 +261,7 @@ func TestHistoryLimits(t *testing.T) {
 	c := mustCreate(t, s, owner, "General")
 	empty := mustCreate(t, s, owner, "Empty")
 	for i := range 150 {
-		s.SendMessage(ctx, member, c.ID, fmt.Sprint(i))
+		s.SendMessage(ctx, member, c.ID, fmt.Sprint(i), 0)
 	}
 
 	if page, _, _ := s.ListMessages(ctx, owner, c.ID, 0, 500); len(page) != MaxPageSize {
@@ -281,8 +282,8 @@ func TestHistoryDoesNotMixChannels(t *testing.T) {
 	s, _, owner, member := setup(t)
 	a := mustCreate(t, s, owner, "A")
 	b := mustCreate(t, s, owner, "B")
-	s.SendMessage(ctx, member, a.ID, "in A")
-	s.SendMessage(ctx, member, b.ID, "in B")
+	s.SendMessage(ctx, member, a.ID, "in A", 0)
+	s.SendMessage(ctx, member, b.ID, "in B", 0)
 
 	page, _, _ := s.ListMessages(ctx, owner, a.ID, 0, 50)
 	if len(page) != 1 || page[0].Content != "in A" {
@@ -293,8 +294,8 @@ func TestHistoryDoesNotMixChannels(t *testing.T) {
 func TestRoomListPreview(t *testing.T) {
 	s, _, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
-	s.SendMessage(ctx, owner, c.ID, "first")
-	s.SendMessage(ctx, member, c.ID, strings.Repeat("ab", 80)) // 160 characters
+	s.SendMessage(ctx, owner, c.ID, "first", 0)
+	s.SendMessage(ctx, member, c.ID, strings.Repeat("ab", 80), 0) // 160 characters
 
 	list, _ := s.ListChannels(ctx, owner)
 	p := list[0].LastMessage
@@ -309,7 +310,7 @@ func TestRoomListPreview(t *testing.T) {
 func TestMessagesOfDeletedAccountStay(t *testing.T) {
 	s, pool, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
-	s.SendMessage(ctx, member, c.ID, "I was here")
+	s.SendMessage(ctx, member, c.ID, "I was here", 0)
 
 	if _, err := pool.Exec(ctx, "DELETE FROM users WHERE id = $1", member.ID); err != nil {
 		t.Fatal(err)
@@ -363,7 +364,7 @@ func TestPrivateChannelIsInvisibleToLowerRoles(t *testing.T) {
 		t.Fatal(err)
 	}
 	mod := withRole(member, perm.Moderator)
-	s.SendMessage(ctx, mod, staff.ID, "secret plans")
+	s.SendMessage(ctx, mod, staff.ID, "secret plans", 0)
 
 	list, _ := s.ListChannels(ctx, member)
 	if got := names(list); len(got) != 1 || got[0] != "General" {
@@ -378,7 +379,7 @@ func TestPrivateChannelIsInvisibleToLowerRoles(t *testing.T) {
 	if _, _, err := s.ListMessages(ctx, member, staff.ID, 0, 50); !errors.Is(err, ErrChannelNotFound) {
 		t.Errorf("member reads private history: %v, want ErrChannelNotFound", err)
 	}
-	if _, _, err := s.SendMessage(ctx, member, staff.ID, "let me in"); !errors.Is(err, ErrChannelNotFound) {
+	if _, _, err := s.SendMessage(ctx, member, staff.ID, "let me in", 0); !errors.Is(err, ErrChannelNotFound) {
 		t.Errorf("member writes in private channel: %v, want ErrChannelNotFound", err)
 	}
 	if page, _, err := s.ListMessages(ctx, mod, staff.ID, 0, 50); err != nil || len(page) != 1 {
@@ -393,13 +394,13 @@ func TestReadOnlyChannel(t *testing.T) {
 		t.Fatalf("roles %s/%s, want member/moderator", news.ViewRole, news.SendRole)
 	}
 
-	if _, _, err := s.SendMessage(ctx, member, news.ID, "hi"); !errors.Is(err, ErrReadOnly) {
+	if _, _, err := s.SendMessage(ctx, member, news.ID, "hi", 0); !errors.Is(err, ErrReadOnly) {
 		t.Errorf("member writes in read-only channel: %v, want ErrReadOnly", err)
 	}
 	if _, _, err := s.ListMessages(ctx, member, news.ID, 0, 50); err != nil {
 		t.Errorf("member must still read it: %v", err)
 	}
-	if _, _, err := s.SendMessage(ctx, withRole(member, perm.Moderator), news.ID, "news!"); err != nil {
+	if _, _, err := s.SendMessage(ctx, withRole(member, perm.Moderator), news.ID, "news!", 0); err != nil {
 		t.Errorf("moderator writes: %v", err)
 	}
 }
@@ -466,8 +467,8 @@ func TestChannelAccessLookup(t *testing.T) {
 func TestModeratorDeletesMessage(t *testing.T) {
 	s, pool, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
-	m, _, _ := s.SendMessage(ctx, member, c.ID, "something rude")
-	s.SendMessage(ctx, member, c.ID, "something nice")
+	m, _, _ := s.SendMessage(ctx, member, c.ID, "something rude", 0)
+	s.SendMessage(ctx, member, c.ID, "something nice", 0)
 	mod := withRole(addUser(t, pool, "mod", "Mod", false), perm.Moderator)
 	pool.Exec(ctx, "UPDATE users SET role = 'moderator' WHERE id = $1", mod.ID)
 
@@ -501,15 +502,15 @@ func TestMessageDeletionRules(t *testing.T) {
 	s, pool, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
 	staff, _ := s.CreateChannel(ctx, owner, ChannelSettings{Name: "Staff", ViewRole: perm.Admin})
-	byMember, _, _ := s.SendMessage(ctx, member, c.ID, "member text")
-	byOwner, _, _ := s.SendMessage(ctx, owner, c.ID, "owner text")
-	inStaff, _, _ := s.SendMessage(ctx, owner, staff.ID, "admin talk")
+	byMember, _, _ := s.SendMessage(ctx, member, c.ID, "member text", 0)
+	byOwner, _, _ := s.SendMessage(ctx, owner, c.ID, "owner text", 0)
+	inStaff, _, _ := s.SendMessage(ctx, owner, staff.ID, "admin talk", 0)
 
 	mod := withRole(member, perm.Moderator)
 	other := withRole(addUser(t, pool, "other", "Other", false), perm.Member)
 
 	if _, err := s.DeleteMessage(ctx, other, c.ID, byMember.ID); !errors.Is(err, accounts.ErrForbidden) {
-		t.Errorf("member deletes someone's message: %v, want ErrForbidden (own messages come in M6)", err)
+		t.Errorf("member deletes someone's message: %v, want ErrForbidden", err)
 	}
 	if _, err := s.DeleteMessage(ctx, mod, c.ID, byOwner.ID); !errors.Is(err, accounts.ErrForbidden) {
 		t.Errorf("moderator deletes the owner's message: %v, want ErrForbidden", err)
@@ -528,7 +529,7 @@ func TestMessageDeletionRules(t *testing.T) {
 func TestDeletedAccountMessagesCanBeRemoved(t *testing.T) {
 	s, pool, owner, member := setup(t)
 	c := mustCreate(t, s, owner, "General")
-	m, _, _ := s.SendMessage(ctx, member, c.ID, "old message")
+	m, _, _ := s.SendMessage(ctx, member, c.ID, "old message", 0)
 	pool.Exec(ctx, "DELETE FROM users WHERE id = $1", member.ID)
 
 	mod := withRole(addUser(t, pool, "mod", "Mod", false), perm.Moderator)
@@ -540,9 +541,135 @@ func TestDeletedAccountMessagesCanBeRemoved(t *testing.T) {
 func TestDatabaseRejectsHalfDeletedMessages(t *testing.T) {
 	s, pool, owner, _ := setup(t)
 	c := mustCreate(t, s, owner, "General")
-	m, _, _ := s.SendMessage(ctx, owner, c.ID, "keep me consistent")
+	m, _, _ := s.SendMessage(ctx, owner, c.ID, "keep me consistent", 0)
 	// "deleted" but text still there: the database refuses (defense in depth).
 	if _, err := pool.Exec(ctx, "UPDATE messages SET deleted_at = now() WHERE id = $1", m.ID); err == nil {
 		t.Error("a deleted message that still has its text was accepted")
+	}
+}
+
+// ---- replies, edits, deleting own messages (M6) ----
+
+func TestReplies(t *testing.T) {
+	s, _, owner, member := setup(t)
+	c := mustCreate(t, s, owner, "General")
+	orig, _, _ := s.SendMessage(ctx, owner, c.ID, strings.Repeat("x", 150), 0)
+
+	reply, _, err := s.SendMessage(ctx, member, c.ID, "agreed", orig.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := reply.ReplyTo
+	if q == nil || q.ID != orig.ID || q.Author == nil || q.Author.ID != owner.ID || q.Deleted {
+		t.Fatalf("reply quote %+v: want the owner's message", q)
+	}
+	if n := utf8.RuneCountInString(q.Content); n != previewLength+1 { // 100 + "…"
+		t.Errorf("quote has %d characters, want it shortened to %d + …", n, previewLength)
+	}
+
+	// The history shows the same quote; normal messages have none.
+	page, _, _ := s.ListMessages(ctx, member, c.ID, 0, 50)
+	if page[0].ReplyTo != nil || page[1].ReplyTo == nil || page[1].ReplyTo.ID != orig.ID {
+		t.Errorf("history replies: %+v / %+v", page[0].ReplyTo, page[1].ReplyTo)
+	}
+
+	// When the original is deleted, the reply stays but its quote says so (and has no text).
+	s.DeleteMessage(ctx, owner, c.ID, orig.ID)
+	page, _, _ = s.ListMessages(ctx, member, c.ID, 0, 50)
+	if q := page[1].ReplyTo; q == nil || !q.Deleted || q.Content != "" {
+		t.Errorf("quote of a deleted message: %+v", q)
+	}
+	// ... and you cannot start a new reply to it.
+	if _, _, err := s.SendMessage(ctx, member, c.ID, "hm", orig.ID); validationField(err) != "reply_to" {
+		t.Errorf("reply to a deleted message: %v, want reply_to validation error", err)
+	}
+}
+
+func TestReplyCannotQuoteAnotherChannel(t *testing.T) {
+	s, _, owner, member := setup(t)
+	c := mustCreate(t, s, owner, "General")
+	staff, _ := s.CreateChannel(ctx, owner, ChannelSettings{Name: "Staff", ViewRole: perm.Admin})
+	secret, _, _ := s.SendMessage(ctx, owner, staff.ID, "secret plans", 0)
+
+	// A member guesses the id of a staff message and "replies" to it in General: the
+	// quote would show the secret to everyone in General. Must be refused.
+	if _, _, err := s.SendMessage(ctx, member, c.ID, "what is this?", secret.ID); validationField(err) != "reply_to" {
+		t.Errorf("reply across channels: %v, want reply_to validation error", err)
+	}
+	if _, _, err := s.SendMessage(ctx, member, c.ID, "hm", 999999); validationField(err) != "reply_to" {
+		t.Errorf("reply to a missing message: %v", err)
+	}
+}
+
+func TestEditMessage(t *testing.T) {
+	s, _, owner, member := setup(t)
+	c := mustCreate(t, s, owner, "General")
+	m, _, _ := s.SendMessage(ctx, member, c.ID, "helo", 0)
+	if m.EditedAt != nil {
+		t.Error("a new message is marked as edited")
+	}
+
+	edited, ch, err := s.EditMessage(ctx, member, c.ID, m.ID, "hello")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edited.Content != "hello" || edited.EditedAt == nil || ch.ID != c.ID {
+		t.Errorf("edited %+v: want new text and edited_at set", edited)
+	}
+	page, _, _ := s.ListMessages(ctx, owner, c.ID, 0, 50)
+	if page[0].Content != "hello" || page[0].EditedAt == nil {
+		t.Errorf("history after edit: %+v", page[0])
+	}
+
+	// Only the author: not even the owner can put words in someone's mouth.
+	if _, _, err := s.EditMessage(ctx, owner, c.ID, m.ID, "I am the owner"); !errors.Is(err, accounts.ErrForbidden) {
+		t.Errorf("owner edits a member's message: %v, want ErrForbidden", err)
+	}
+	if _, _, err := s.EditMessage(ctx, member, c.ID, m.ID, "   "); validationField(err) != "content" {
+		t.Errorf("empty edit: %v, want content validation error", err)
+	}
+	if _, _, err := s.EditMessage(ctx, member, c.ID, 999999, "x"); !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("edit missing message: %v", err)
+	}
+
+	// Deleted messages cannot be brought back by editing.
+	s.DeleteMessage(ctx, member, c.ID, m.ID)
+	if _, _, err := s.EditMessage(ctx, member, c.ID, m.ID, "I'm back"); !errors.Is(err, ErrMessageNotFound) {
+		t.Errorf("edit a deleted message: %v, want ErrMessageNotFound", err)
+	}
+}
+
+func TestEditNeedsWriteAccess(t *testing.T) {
+	s, _, owner, member := setup(t)
+	c := mustCreate(t, s, owner, "General")
+	m, _, _ := s.SendMessage(ctx, member, c.ID, "before the lock", 0)
+	locked := perm.Moderator
+	s.UpdateChannel(ctx, owner, c.ID, ChannelChanges{SendRole: &locked})
+
+	if _, _, err := s.EditMessage(ctx, member, c.ID, m.ID, "sneaky"); !errors.Is(err, ErrReadOnly) {
+		t.Errorf("edit in a now read-only channel: %v, want ErrReadOnly", err)
+	}
+	// Removing your own words is still allowed.
+	if _, err := s.DeleteMessage(ctx, member, c.ID, m.ID); err != nil {
+		t.Errorf("delete own message in a read-only channel: %v", err)
+	}
+}
+
+func TestDeleteOwnMessage(t *testing.T) {
+	s, pool, owner, member := setup(t)
+	c := mustCreate(t, s, owner, "General")
+	mine, _, _ := s.SendMessage(ctx, member, c.ID, "oops", 0)
+	theirs, _, _ := s.SendMessage(ctx, owner, c.ID, "not yours", 0)
+
+	if _, err := s.DeleteMessage(ctx, member, c.ID, mine.ID); err != nil {
+		t.Fatalf("member deletes own message: %v", err)
+	}
+	var deletedBy int64
+	pool.QueryRow(ctx, "SELECT deleted_by FROM messages WHERE id = $1", mine.ID).Scan(&deletedBy)
+	if deletedBy != member.ID {
+		t.Errorf("deleted_by = %d, want the author", deletedBy)
+	}
+	if _, err := s.DeleteMessage(ctx, member, c.ID, theirs.ID); !errors.Is(err, accounts.ErrForbidden) {
+		t.Errorf("member deletes someone else's: %v, want ErrForbidden", err)
 	}
 }

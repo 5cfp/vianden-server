@@ -37,6 +37,8 @@ type Message struct {
 	CreatedAt time.Time
 	DeletedAt *time.Time
 	DeletedBy *int64
+	ReplyToID *int64
+	EditedAt  *time.Time
 }
 
 type Session struct {
