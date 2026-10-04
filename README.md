@@ -78,6 +78,7 @@ No output from `check` means everything is allowed.
 | `internal/api/` | REST API handlers |
 | `internal/auth/` | Password hashing (Argon2id) and secret tokens (sessions, invites) |
 | `internal/chat/` | Text channels and messages (validation, permissions, history pagination) |
+| `internal/realtime/` | WebSocket hub: pushes live events (messages, presence, typing) to connected clients |
 | `internal/config/` | Loads settings from environment variables / `.env` |
 | `internal/db/` | PostgreSQL connection + migration runner |
 | `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |

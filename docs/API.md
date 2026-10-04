@@ -88,6 +88,7 @@ Every error response (any 4xx or 5xx status) has this body:
 | `username_taken` | 409 | Another account already has this username (comparison ignores case). |
 | `channel_name_taken` | 409 | Another channel already has this name (comparison ignores case). |
 | `rate_limited` | 429 | Too many attempts. Wait the number of seconds in the `Retry-After` header. |
+| `too_many_connections` | 429 | `GET /api/v1/ws` only: this account already has 10 open WebSocket connections. |
 | `internal_error` | 500 | Unexpected server error. Details are only in the server log. |
 
 ---
@@ -415,6 +416,7 @@ Creates a text channel at the end of the list.
 - **Request body:** `{ "name": "Games", "topic": "Who is online tonight?" }` (`topic` optional)
 - **Response `201 Created`:** `{ "channel": <channel object> }`
 - **Errors:** `invalid_request` (400), `invalid_name` (400), `invalid_topic` (400), `unauthorized` (401), `forbidden` (403), `channel_name_taken` (409).
+- Also sent to every connected client as a [`channel.created`](#channelcreated-channelupdated-channeldeleted) event.
 
 ### `PATCH /api/v1/channels/{id}`
 Renames a channel and/or changes its topic. Send only the fields to change.
@@ -426,6 +428,7 @@ Renames a channel and/or changes its topic. Send only the fields to change.
 
 ### `DELETE /api/v1/channels/{id}`
 Deletes a channel **and all its messages**. This cannot be undone.
+Connected clients receive `channel.deleted`; renames (PATCH) send `channel.updated`.
 
 - **Auth:** session token; **owner only**
 - **Response `204 No Content`:** no body.
@@ -473,12 +476,101 @@ Sends a message as the logged-in user.
 - **Response `201 Created`:** `{ "message": <message object> }`
 - **Errors:** `invalid_request` (400), `invalid_content` (400), `unauthorized` (401), `not_found` (404), `rate_limited` (429).
 - **Rate limited** per user (see [Rate limits](#rate-limits)).
-- Messages are not pushed to other users yet (real-time arrives in M3); clients reload the history to see new messages.
+- Every connected client (including the sender's other devices) also receives the new message as a [`message.created`](#messagecreated) WebSocket event.
 
 ---
 
 ## 5. WebSocket
-> Not available yet: arrives in milestone M3 (`/api/v1/ws`, authentication, event types, reconnect rules).
+
+The WebSocket delivers **live events**: new messages, room changes, who is online, and who is typing. Everything else (sending messages, loading history) uses the REST API; the WebSocket only pushes.
+
+### Connecting
+```
+GET /api/v1/ws
+Authorization: Bearer vs_...
+```
+- Use `ws://` for an `http://` server and `wss://` for an `https://` server, same host and port.
+- Authenticate with the **same `Authorization` header** as REST. Do not put the token in the URL: URLs end up in logs.
+- Failures before the upgrade are normal HTTP errors in the [standard error format](#2-standard-error-format): `401 unauthorized` (missing or invalid token) or `429 too_many_connections` (more than **10** open connections for this account).
+- Browsers on other websites cannot connect: a request with an `Origin` header that does not match the server's host is refused with `403` (protection against cross-site WebSocket hijacking). Native apps send no `Origin` and are not affected.
+
+### Message format
+Every message, in both directions, is one JSON text frame:
+```json
+{ "type": "message.created", "data": { ... } }
+```
+Clients must **ignore unknown `type` values** (newer servers may add events).
+
+### Keepalive and limits
+- The server sends a WebSocket **ping every 30 seconds**. A connection that does not answer within 10 seconds is closed. Standard WebSocket libraries answer pings automatically.
+- Client messages may be at most **4096 bytes**; a bigger one closes the connection with code `1009`.
+- If a client reads events too slowly (more than 64 waiting), the server closes it with code `4008`.
+
+### Close codes
+| Code | Meaning | What the client should do |
+|---|---|---|
+| `1000` | Normal close | Nothing (reconnect if it was not you who closed it). |
+| `1001` | Server shutting down | Reconnect with backoff. |
+| `1009` | Your message was too big | Fix the client; reconnect. |
+| `4001` | Session ended (logged out or revoked) | **Do not reconnect.** Delete the token and show the login screen. |
+| `4008` | Too slow reading events | Reconnect, then reload what you show (you missed events). |
+| other / no code | Network problem | Reconnect with backoff. |
+
+### Reconnecting
+Connections drop (Wi-Fi, sleep, server restart). Clients should:
+1. Reconnect automatically, waiting a little longer after each failure (for example 1, 2, 4, 8 ... up to 30 seconds, plus a random part so many clients do not reconnect at the same moment).
+2. If the reconnect fails, call `GET /api/v1/me`: a `401` means the session is gone (log out locally and stop reconnecting).
+3. After reconnecting, **reload** the room list and the newest page of the open room: events sent while disconnected are not replayed.
+
+### Server → client events
+
+#### `ready`
+First event after connecting.
+```json
+{ "type": "ready", "data": {
+    "user": { "id": 1, "username": "osama", "display_name": "Osama" },
+    "online": [ { "id": 1, "username": "osama", "display_name": "Osama" },
+                { "id": 2, "username": "sara",  "display_name": "Sara" } ] } }
+```
+`online` lists every user with at least one open connection, including you.
+
+#### `presence.updated`
+A user came online (first connection) or went offline (last connection closed). Extra devices of an already-online user do not trigger it.
+```json
+{ "type": "presence.updated", "data": {
+    "user": { "id": 2, "username": "sara", "display_name": "Sara" }, "online": false } }
+```
+
+#### `message.created`
+A new message in any channel. `data` is a [message object](#message-object). The sender receives it too (it may arrive before or after the REST response); use the message `id` to avoid showing it twice.
+```json
+{ "type": "message.created", "data": {
+    "id": 43, "channel_id": 1,
+    "author": { "id": 2, "username": "sara", "display_name": "Sara" },
+    "content": "On my way!", "created_at": "2026-10-04T18:44:00Z" } }
+```
+
+#### `channel.created`, `channel.updated`, `channel.deleted`
+The owner created, renamed (or changed the topic of), or deleted a channel. For `created` and `updated`, `data` is a [channel object](#channel-object) (`last_message` is `null`); for `deleted` it is `{ "id": 3 }`.
+```json
+{ "type": "channel.deleted", "data": { "id": 3 } }
+```
+
+#### `typing.started`
+Someone is typing in a channel. Show it for about **5 seconds**; repeated events keep it alive. You never receive your own typing.
+```json
+{ "type": "typing.started", "data": {
+    "channel_id": 1, "user": { "id": 2, "username": "sara", "display_name": "Sara" } } }
+```
+
+### Client → server events
+
+#### `typing`
+Send while the user is typing in a channel, **at most every 3 seconds**. The server forwards it to everyone else as `typing.started` (at most once every 2 seconds per user and channel; extra ones are dropped).
+```json
+{ "type": "typing", "data": { "channel_id": 1 } }
+```
+Unknown or malformed client messages are ignored.
 
 ---
 
@@ -501,6 +593,7 @@ Sends a message as the logged-in user.
 |---|---|
 | `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
 | `POST /channels/{id}/messages` | 10 messages at once, then 1 more per second, **per user** |
+| `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes; `typing` forwarded at most every 2 s per user and channel |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
 
@@ -516,4 +609,5 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added `POST /api/v1/login`, `POST /api/v1/logout`, `GET /api/v1/me`, bearer token authentication, and rate limits on register and login.
 - Added `POST /api/v1/invites`, `GET /api/v1/invites`, `DELETE /api/v1/invites/{id}` (owner only).
 - Added channels (`GET`, `POST /api/v1/channels`, `PATCH`, `DELETE /api/v1/channels/{id}`) and messages (`GET`, `POST /api/v1/channels/{id}/messages`) with keyset pagination.
+- Added the WebSocket at `GET /api/v1/ws` with events `ready`, `presence.updated`, `message.created`, `channel.created`, `channel.updated`, `channel.deleted`, `typing.started` (server to client) and `typing` (client to server).
 - All responses now send `Cache-Control: no-store`; request bodies are limited to 64 KiB and parsed strictly.

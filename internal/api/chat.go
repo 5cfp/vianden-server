@@ -91,7 +91,7 @@ type channelRequest struct {
 	Topic *string `json:"topic"`
 }
 
-func handleCreateChannel(svc Chat, logger *slog.Logger) authedHandler {
+func handleCreateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		var req channelRequest
 		if err := decodeJSON(w, r, &req); err != nil {
@@ -111,13 +111,14 @@ func handleCreateChannel(svc Chat, logger *slog.Logger) authedHandler {
 			return
 		}
 		logger.Info("channel created", "channel_id", c.ID, "by_user_id", s.User.ID)
+		rt.Broadcast("channel.created", toChannelResponse(c))
 		writeJSON(w, http.StatusCreated, struct {
 			Channel channelResponse `json:"channel"`
 		}{toChannelResponse(c)})
 	}
 }
 
-func handleUpdateChannel(svc Chat, logger *slog.Logger) authedHandler {
+func handleUpdateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
@@ -135,13 +136,14 @@ func handleUpdateChannel(svc Chat, logger *slog.Logger) authedHandler {
 			return
 		}
 		logger.Info("channel updated", "channel_id", c.ID, "by_user_id", s.User.ID)
+		rt.Broadcast("channel.updated", toChannelResponse(c))
 		writeJSON(w, http.StatusOK, struct {
 			Channel channelResponse `json:"channel"`
 		}{toChannelResponse(c)})
 	}
 }
 
-func handleDeleteChannel(svc Chat, logger *slog.Logger) authedHandler {
+func handleDeleteChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
@@ -153,6 +155,7 @@ func handleDeleteChannel(svc Chat, logger *slog.Logger) authedHandler {
 			return
 		}
 		logger.Info("channel deleted", "channel_id", id, "by_user_id", s.User.ID)
+		rt.Broadcast("channel.deleted", map[string]int64{"id": id})
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -194,7 +197,7 @@ func handleListMessages(svc Chat, logger *slog.Logger) authedHandler {
 	}
 }
 
-func handleSendMessage(svc Chat, logger *slog.Logger) authedHandler {
+func handleSendMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
@@ -214,9 +217,11 @@ func handleSendMessage(svc Chat, logger *slog.Logger) authedHandler {
 			writeServiceError(w, logger, "send message", err)
 			return
 		}
+		resp := toMessageResponse(m)
+		rt.Broadcast("message.created", resp) // to everyone, the sender's other devices too
 		writeJSON(w, http.StatusCreated, struct {
 			Message messageResponse `json:"message"`
-		}{toMessageResponse(m)})
+		}{resp})
 	}
 }
 

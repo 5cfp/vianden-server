@@ -18,6 +18,7 @@ import (
 	"github.com/5cfp/vianden-server/internal/chat"
 	"github.com/5cfp/vianden-server/internal/config"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/realtime"
 	"github.com/5cfp/vianden-server/internal/supervisor"
 )
 
@@ -71,15 +72,19 @@ func run(logger *slog.Logger) error {
 		logger.Warn("this server has no owner yet: register with the setup token printed above")
 	}
 
+	// The hub keeps all live (WebSocket) connections and pushes events to them.
+	hub := realtime.NewHub(logger)
+
 	handler := api.NewHandler(api.Deps{
 		ServerName: cfg.ServerName,
 		DB:         pool,
 		Accounts:   accountService,
 		Chat:       chat.NewService(pool),
+		Realtime:   hub,
 		Logger:     logger,
 	})
 	supervisor.Run(ctx, logger, "http", func(ctx context.Context) error {
-		return serveHTTP(ctx, cfg.ListenAddr, handler)
+		return serveHTTP(ctx, cfg.ListenAddr, handler, hub.CloseAll)
 	})
 
 	logger.Info("vianden-server stopped")
@@ -107,7 +112,7 @@ func printSetupToken(token string) {
 
 // serveHTTP runs the HTTP server until ctx is cancelled, then shuts it down gracefully
 // (in-flight requests get up to 10 seconds to finish).
-func serveHTTP(ctx context.Context, addr string, handler http.Handler) error {
+func serveHTTP(ctx context.Context, addr string, handler http.Handler, onShutdown func()) error {
 	srv := &http.Server{
 		Addr:    addr,
 		Handler: handler,
@@ -116,6 +121,9 @@ func serveHTTP(ctx context.Context, addr string, handler http.Handler) error {
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 	}
+	// Shutdown does not wait for WebSocket connections (they are "hijacked" from the HTTP
+	// server), so close them ourselves when shutting down.
+	srv.RegisterOnShutdown(onShutdown)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.ListenAndServe() }()

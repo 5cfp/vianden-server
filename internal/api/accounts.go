@@ -142,13 +142,14 @@ func writeUnauthorized(w http.ResponseWriter) {
 	writeError(w, http.StatusUnauthorized, "unauthorized", accounts.ErrUnauthenticated.Error())
 }
 
-func handleLogout(svc Accounts, logger *slog.Logger) authedHandler {
+func handleLogout(svc Accounts, rt Realtime, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		if err := svc.Logout(r.Context(), s.ID); err != nil {
 			logger.Error("logout failed", "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")
 			return
 		}
+		rt.EndSession(s.ID) // live connections of this session close too
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

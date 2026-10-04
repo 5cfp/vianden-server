@@ -35,17 +35,29 @@ type Accounts interface {
 	DeleteInvite(ctx context.Context, by accounts.User, id int64) error
 }
 
+// Realtime pushes live events to connected clients. The real server passes a
+// *realtime.Hub; tests pass a fake (or nothing: then events are simply dropped).
+type Realtime interface {
+	Serve(w http.ResponseWriter, r *http.Request, s accounts.Session)
+	Broadcast(eventType string, data any)
+	EndSession(sessionID int64)
+}
+
 // Deps are the things the API handlers depend on.
 type Deps struct {
 	ServerName string
 	DB         Pinger
 	Accounts   Accounts
 	Chat       Chat
+	Realtime   Realtime
 	Logger     *slog.Logger
 }
 
 // NewHandler returns the HTTP handler for the whole API.
 func NewHandler(d Deps) http.Handler {
+	if d.Realtime == nil {
+		d.Realtime = noRealtime{}
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", handleHealth(d.DB, d.Logger))
 	mux.HandleFunc("GET /api/v1/info", handleInfo(d.ServerName))
@@ -56,7 +68,7 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/login", authLimit.limit(handleLogin(d.Accounts, d.Logger)))
 
 	// These need a valid session token.
-	mux.HandleFunc("POST /api/v1/logout", requireAuth(d.Accounts, d.Logger, handleLogout(d.Accounts, d.Logger)))
+	mux.HandleFunc("POST /api/v1/logout", requireAuth(d.Accounts, d.Logger, handleLogout(d.Accounts, d.Realtime, d.Logger)))
 	mux.HandleFunc("GET /api/v1/me", requireAuth(d.Accounts, d.Logger, handleMe))
 	mux.HandleFunc("POST /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleCreateInvite(d.Accounts, d.Logger)))
 	mux.HandleFunc("GET /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleListInvites(d.Accounts, d.Logger)))
@@ -64,13 +76,16 @@ func NewHandler(d Deps) http.Handler {
 
 	// Channels and messages (any logged-in user; managing channels: owner only, checked in the service).
 	mux.HandleFunc("GET /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleListChannels(d.Chat, d.Logger)))
-	mux.HandleFunc("POST /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleCreateChannel(d.Chat, d.Logger)))
-	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Logger)))
-	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Logger)))
+	mux.HandleFunc("POST /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleCreateChannel(d.Chat, d.Realtime, d.Logger)))
+	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Realtime, d.Logger)))
+	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Realtime, d.Logger)))
 	mux.HandleFunc("GET /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, handleListMessages(d.Chat, d.Logger)))
 	// Sending: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
 	sendLimit := newIPRateLimiter(60, 10)
-	mux.HandleFunc("POST /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleSendMessage(d.Chat, d.Logger))))
+	mux.HandleFunc("POST /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleSendMessage(d.Chat, d.Realtime, d.Logger))))
+
+	// Live events (WebSocket). Login is checked BEFORE the upgrade, with the normal Bearer header.
+	mux.HandleFunc("GET /api/v1/ws", requireAuth(d.Accounts, d.Logger, d.Realtime.Serve))
 
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)
@@ -191,3 +206,12 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body) // the client may have disconnected; nothing useful to do
 }
+
+// noRealtime is used when no Realtime is given (tests): events go nowhere.
+type noRealtime struct{}
+
+func (noRealtime) Serve(w http.ResponseWriter, _ *http.Request, _ accounts.Session) {
+	writeError(w, http.StatusNotFound, "not_found", "route not found")
+}
+func (noRealtime) Broadcast(string, any) {}
+func (noRealtime) EndSession(int64)      {}
