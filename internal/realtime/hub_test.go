@@ -461,3 +461,35 @@ func TestTypingRespectsChannelAccess(t *testing.T) {
 	other.nothing()
 	mod.nothing()
 }
+
+func TestSendToUserReachesOnlyTheirDevices(t *testing.T) {
+	hub, url := testServer(t)
+	desktop := dialAs(t, url, 7, 1, perm.Member)
+	laptop := dialAs(t, url, 7, 2, perm.Member)
+	other := dialAs(t, url, 8, 3, perm.Member)
+
+	hub.SendToUser(7, "channel.read", map[string]int64{"channel_id": 1, "last_read_id": 9})
+	hub.Broadcast("marker", nil)
+
+	for name, c := range map[string]*conn{"desktop": desktop, "laptop": laptop} {
+		if e := c.next(); e.Type != "channel.read" {
+			t.Errorf("%s got %+v, want channel.read", name, e)
+		}
+	}
+	if e := other.next(); e.Type != "marker" {
+		t.Errorf("another user got %+v before the marker", e)
+	}
+}
+
+func TestUpdateUserProfileRenamesInTheOnlineList(t *testing.T) {
+	hub, url := testServer(t)
+	dial(t, url, 7, 1)
+	hub.UpdateUserProfile(7, "Renamed")
+	_, ready := dial(t, url, 8, 2)
+	for _, u := range ready["online"].([]any) {
+		info := u.(map[string]any)
+		if info["id"] == float64(7) && info["display_name"] != "Renamed" {
+			t.Errorf("online list shows %v", info["display_name"])
+		}
+	}
+}

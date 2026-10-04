@@ -23,8 +23,33 @@ func (q *Queries) BanUser(ctx context.Context, arg BanUserParams) error {
 	return err
 }
 
+const existingAvatarKeys = `-- name: ExistingAvatarKeys :many
+SELECT avatar_key::text FROM users WHERE avatar_key = ANY($1::text[])
+`
+
+// Which of these avatar files on disk still belong to a user.
+func (q *Queries) ExistingAvatarKeys(ctx context.Context, keys []string) ([]string, error) {
+	rows, err := q.db.Query(ctx, existingAvatarKeys, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []string
+	for rows.Next() {
+		var avatar_key string
+		if err := rows.Scan(&avatar_key); err != nil {
+			return nil, err
+		}
+		items = append(items, avatar_key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getUser = `-- name: GetUser :one
-SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason FROM users WHERE id = $1
+SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key FROM users WHERE id = $1
 `
 
 func (q *Queries) GetUser(ctx context.Context, id int64) (User, error) {
@@ -39,12 +64,13 @@ func (q *Queries) GetUser(ctx context.Context, id int64) (User, error) {
 		&i.Role,
 		&i.BannedAt,
 		&i.BanReason,
+		&i.AvatarKey,
 	)
 	return i, err
 }
 
 const listUsers = `-- name: ListUsers :many
-SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason FROM users ORDER BY username
+SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key FROM users ORDER BY username
 `
 
 func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
@@ -65,6 +91,7 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 			&i.Role,
 			&i.BannedAt,
 			&i.BanReason,
+			&i.AvatarKey,
 		); err != nil {
 			return nil, err
 		}
@@ -89,8 +116,61 @@ func (q *Queries) RevokeUserSessions(ctx context.Context, userID int64) (int64, 
 	return result.RowsAffected(), nil
 }
 
+const setAvatarKey = `-- name: SetAvatarKey :one
+UPDATE users SET avatar_key = $2 WHERE id = $1 RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key
+`
+
+type SetAvatarKeyParams struct {
+	ID        int64
+	AvatarKey *string
+}
+
+// Returns the updated user. (The old avatar file is removed by the caller / the cleanup.)
+func (q *Queries) SetAvatarKey(ctx context.Context, arg SetAvatarKeyParams) (User, error) {
+	row := q.db.QueryRow(ctx, setAvatarKey, arg.ID, arg.AvatarKey)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.DisplayName,
+		&i.PasswordHash,
+		&i.CreatedAt,
+		&i.Role,
+		&i.BannedAt,
+		&i.BanReason,
+		&i.AvatarKey,
+	)
+	return i, err
+}
+
+const setDisplayName = `-- name: SetDisplayName :one
+UPDATE users SET display_name = $2 WHERE id = $1 RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key
+`
+
+type SetDisplayNameParams struct {
+	ID          int64
+	DisplayName string
+}
+
+func (q *Queries) SetDisplayName(ctx context.Context, arg SetDisplayNameParams) (User, error) {
+	row := q.db.QueryRow(ctx, setDisplayName, arg.ID, arg.DisplayName)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.Username,
+		&i.DisplayName,
+		&i.PasswordHash,
+		&i.CreatedAt,
+		&i.Role,
+		&i.BannedAt,
+		&i.BanReason,
+		&i.AvatarKey,
+	)
+	return i, err
+}
+
 const setUserRole = `-- name: SetUserRole :one
-UPDATE users SET role = $2 WHERE id = $1 RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason
+UPDATE users SET role = $2 WHERE id = $1 RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key
 `
 
 type SetUserRoleParams struct {
@@ -110,6 +190,7 @@ func (q *Queries) SetUserRole(ctx context.Context, arg SetUserRoleParams) (User,
 		&i.Role,
 		&i.BannedAt,
 		&i.BanReason,
+		&i.AvatarKey,
 	)
 	return i, err
 }

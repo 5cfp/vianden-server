@@ -24,6 +24,7 @@ import (
 	"github.com/5cfp/vianden-server/internal/chat"
 	"github.com/5cfp/vianden-server/internal/config"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/files"
 	"github.com/5cfp/vianden-server/internal/realtime"
 	"github.com/5cfp/vianden-server/internal/supervisor"
 	"github.com/5cfp/vianden-server/internal/web"
@@ -83,6 +84,10 @@ func run(logger *slog.Logger) error {
 
 	// The hub keeps all live (WebSocket) connections and pushes events to them.
 	chatService := chat.NewService(pool)
+	fileService, err := files.NewService(pool, cfg.DataDir)
+	if err != nil {
+		return err
+	}
 	hub := realtime.NewHub(logger)
 	hub.SetChannelAccess(chatService.ChannelAccess) // typing only in channels the sender may see
 
@@ -91,6 +96,9 @@ func run(logger *slog.Logger) error {
 		DB:         pool,
 		Accounts:   accountService,
 		Chat:       chatService,
+		Files:      fileService,
+		Profiles:   accountService,
+		Avatars:    fileService,
 		Realtime:   hub,
 		Logger:     logger,
 	})
@@ -107,7 +115,7 @@ func run(logger *slog.Logger) error {
 	})
 	wg.Go(func() {
 		supervisor.Run(ctx, logger, "cleanup", func(ctx context.Context) error {
-			return cleanupLoop(ctx, accountService, logger)
+			return cleanupLoop(ctx, accountService, fileService, logger)
 		})
 	})
 	wg.Wait()
@@ -116,8 +124,9 @@ func run(logger *slog.Logger) error {
 	return nil
 }
 
-// cleanupLoop deletes expired and logged-out sessions once an hour, so the table does not grow forever.
-func cleanupLoop(ctx context.Context, svc *accounts.Service, logger *slog.Logger) error {
+// cleanupLoop runs once an hour: it deletes expired and logged-out sessions (so the table
+// does not grow forever), and uploads that are no longer used (see files.Service.Cleanup).
+func cleanupLoop(ctx context.Context, svc *accounts.Service, fileSvc *files.Service, logger *slog.Logger) error {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
 	for {
@@ -127,6 +136,13 @@ func cleanupLoop(ctx context.Context, svc *accounts.Service, logger *slog.Logger
 		}
 		if n > 0 {
 			logger.Info("deleted old sessions", "count", n)
+		}
+		removed, err := fileSvc.Cleanup(ctx)
+		if err != nil {
+			return err
+		}
+		if removed > 0 {
+			logger.Info("deleted unused upload files", "count", removed)
 		}
 		select {
 		case <-ctx.Done():

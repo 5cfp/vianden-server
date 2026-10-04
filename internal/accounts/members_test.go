@@ -208,3 +208,23 @@ func TestBanReasonRules(t *testing.T) {
 		t.Errorf("200-character reason should be allowed: %v", err)
 	}
 }
+
+func TestUpdateDisplayName(t *testing.T) {
+	tm := newTeam(t)
+	m, err := tm.svc.UpdateDisplayName(ctx, tm.member.ID, "  Sara 🌙  ")
+	if err != nil || m.DisplayName != "Sara 🌙" {
+		t.Fatalf("got %q, %v; want trimmed name", m.DisplayName, err)
+	}
+	s, err := tm.svc.Authenticate(ctx, tm.tokens["member"])
+	if err != nil || s.User.DisplayName != "Sara 🌙" {
+		t.Errorf("session still shows %q (%v)", s.User.DisplayName, err)
+	}
+	for _, bad := range []string{"", "   ", strings.Repeat("a", 33), "evil" + string(rune(0x202E))} {
+		if _, err := tm.svc.UpdateDisplayName(ctx, tm.member.ID, bad); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	if _, err := tm.svc.UpdateDisplayName(ctx, 999999, "Ghost"); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("unknown user: %v", err)
+	}
+}

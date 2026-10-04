@@ -23,22 +23,23 @@ var AllRoles = []Role{Owner, Admin, Moderator, Member}
 type Permission string
 
 const (
-	ManageChannels Permission = "manage_channels" // create, rename, delete channels; set who can see/write
-	ManageInvites  Permission = "manage_invites"  // create, list, delete invite codes
-	ManageRoles    Permission = "manage_roles"    // change other users' roles (below your own)
-	DeleteMessages Permission = "delete_messages" // delete other people's messages
-	KickMembers    Permission = "kick_members"    // sign a user out everywhere
-	BanMembers     Permission = "ban_members"     // block a user from logging in (and unban)
+	ManageChannels  Permission = "manage_channels"  // create, rename, delete channels; set who can see/write
+	ManageInvites   Permission = "manage_invites"   // create, list, delete invite codes
+	ManageRoles     Permission = "manage_roles"     // change other users' roles (below your own)
+	DeleteMessages  Permission = "delete_messages"  // delete other people's messages
+	KickMembers     Permission = "kick_members"     // sign a user out everywhere
+	BanMembers      Permission = "ban_members"      // block a user from logging in (and unban)
+	MentionEveryone Permission = "mention_everyone" // @everyone pings everyone who can see the channel (M6)
 )
 
 // AllPermissions lists every permission (used for the owner).
-var AllPermissions = []Permission{ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers}
+var AllPermissions = []Permission{ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone}
 
 // rolePermissions: what each role may do (decided in PROJECT_PLAN.md, M5).
 var rolePermissions = map[Role][]Permission{
 	Owner:     AllPermissions,
-	Admin:     {ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers},
-	Moderator: {DeleteMessages, KickMembers},
+	Admin:     {ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone},
+	Moderator: {DeleteMessages, KickMembers, MentionEveryone},
 	Member:    {},
 }
 

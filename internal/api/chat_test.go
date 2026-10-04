@@ -85,7 +85,7 @@ func (f fakeChat) DeleteChannel(_ context.Context, by accounts.User, id int64) (
 	return chat.Channel{ID: id, ViewRole: f.channelView, SendRole: f.channelView}, f.err
 }
 
-func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string, replyTo int64) (chat.Message, chat.Channel, error) {
+func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string, replyTo int64, _ []int64) (chat.Message, chat.Channel, error) {
 	f.record(chatCall{by: by, channelID: channelID, content: content, replyTo: replyTo})
 	if f.err != nil {
 		return chat.Message{}, chat.Channel{}, f.err
@@ -152,8 +152,8 @@ func TestListChannelsResponse(t *testing.T) {
 	}})
 	rec := send(t, h, "GET", "/api/v1/channels", "Bearer vs_member", "")
 	want := `{"channels":[` +
-		`{"id":1,"name":"General","topic":"chat","type":"text","position":0,"view_role":"member","send_role":"moderator","last_message":{"author_name":"Sara","content":"hi","created_at":"2026-10-04T18:30:00Z"}},` +
-		`{"id":2,"name":"Empty","topic":"","type":"text","position":1,"view_role":"member","send_role":"member","last_message":null}]}` + "\n"
+		`{"id":1,"name":"General","topic":"chat","type":"text","position":0,"view_role":"member","send_role":"moderator","last_message":{"author_name":"Sara","content":"hi","created_at":"2026-10-04T18:30:00Z"},"last_read_id":0,"unread_count":0,"mention_count":0},` +
+		`{"id":2,"name":"Empty","topic":"","type":"text","position":1,"view_role":"member","send_role":"member","last_message":null,"last_read_id":0,"unread_count":0,"mention_count":0}]}` + "\n"
 	if rec.Code != http.StatusOK || rec.Body.String() != want {
 		t.Errorf("status %d\n got: %s\nwant: %s", rec.Code, rec.Body, want)
 	}
@@ -219,7 +219,7 @@ func TestSendMessage(t *testing.T) {
 	if got.by.ID != member.ID || got.channelID != 4 || got.content != "hello" {
 		t.Errorf("call %+v: the message must be sent as the logged-in user", got)
 	}
-	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null}}` + "\n"
+	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null,"mentions":[],"mentions_everyone":false,"attachments":[]}}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -258,7 +258,7 @@ func TestListMessagesQuery(t *testing.T) {
 	if rec.Code != http.StatusOK || got.before != 42 || got.limit != 20 {
 		t.Fatalf("status %d, call %+v", rec.Code, got)
 	}
-	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null}],"has_more":true}` + "\n"
+	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,"reply_to":null,"mentions":[],"mentions_everyone":false,"attachments":[]}],"has_more":true}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -338,7 +338,7 @@ func TestSendReply(t *testing.T) {
 		t.Fatalf("status %d, call %+v", rec.Code, got)
 	}
 	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"agreed","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":null,` +
-		`"reply_to":{"id":7,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"original","deleted":false}}}` + "\n"
+		`"reply_to":{"id":7,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"original","deleted":false},"mentions":[],"mentions_everyone":false,"attachments":[]}}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -359,7 +359,7 @@ func TestEditMessage(t *testing.T) {
 	if rec.Code != http.StatusOK || got.channelID != 4 || got.before != 77 || got.content != "fixed typo" || got.by.ID != osama.ID {
 		t.Fatalf("status %d, call %+v", rec.Code, got)
 	}
-	want := `{"message":{"id":77,"channel_id":4,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"fixed typo","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":"2026-10-04T18:31:00Z","reply_to":null}}` + "\n"
+	want := `{"message":{"id":77,"channel_id":4,"author":{"id":1,"username":"osama","display_name":"Osama"},"content":"fixed typo","created_at":"2026-10-04T18:30:00Z","deleted":false,"edited_at":"2026-10-04T18:31:00Z","reply_to":null,"mentions":[],"mentions_everyone":false,"attachments":[]}}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -387,4 +387,42 @@ func TestEditMessageErrors(t *testing.T) {
 	if rec := send(t, chatHandler(fakeChat{}), "PATCH", "/api/v1/channels/4/messages/7", "", `{"content":"x"}`); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: %d", rec.Code)
 	}
+}
+
+func (f fakeChat) MarkRead(_ context.Context, by accounts.User, channelID, messageID int64) (int64, error) {
+	f.record(chatCall{by: by, channelID: channelID, before: messageID})
+	return messageID, f.err
+}
+
+func TestMarkRead(t *testing.T) {
+	var got chatCall
+	rt := &fakeRealtime{}
+	h := realtimeHandler(rt, fakeChat{got: &got})
+
+	rec := send(t, h, "PUT", "/api/v1/channels/4/read", "Bearer vs_member", `{"message_id":55}`)
+	if rec.Code != http.StatusNoContent || got.by.ID != member.ID || got.channelID != 4 || got.before != 55 {
+		t.Fatalf("status %d, call %+v", rec.Code, got)
+	}
+	// Only the same user's devices hear about it.
+	if len(rt.sentTo) != 1 || rt.sentTo[0] != member.ID || rt.events[0] != "channel.read" {
+		t.Errorf("sent %v to %v", rt.events, rt.sentTo)
+	}
+	if d := rt.data[0].(map[string]int64); d["channel_id"] != 4 || d["last_read_id"] != 55 {
+		t.Errorf("event data %v", d)
+	}
+
+	if rec := send(t, h, "PUT", "/api/v1/channels/4/read", "Bearer vs_member", `{"message_id":-1}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("negative id: %d", rec.Code)
+	}
+	if rec := send(t, chatHandler(fakeChat{err: chat.ErrChannelNotFound}), "PUT", "/api/v1/channels/4/read", "Bearer vs_member", `{"message_id":1}`); rec.Code != http.StatusNotFound {
+		t.Errorf("hidden channel: %d", rec.Code)
+	}
+}
+
+// Channel: the fake's channel is visible unless f.err is set (then it "does not exist").
+func (f fakeChat) Channel(_ context.Context, _ accounts.User, id int64) (chat.Channel, error) {
+	if f.err != nil {
+		return chat.Channel{}, chat.ErrChannelNotFound
+	}
+	return chat.Channel{ID: id, ViewRole: or(f.channelView), SendRole: or(f.channelView)}, nil
 }

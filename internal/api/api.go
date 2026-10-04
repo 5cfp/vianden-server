@@ -53,6 +53,10 @@ type Realtime interface {
 	EndSession(sessionID int64)
 	EndUser(userID int64)
 	UpdateUserRole(userID int64, role perm.Role)
+	// SendToUser sends to all open connections of one user (their devices).
+	SendToUser(userID int64, eventType string, data any)
+	// UpdateUserProfile changes the name shown for a user in presence events.
+	UpdateUserProfile(userID int64, displayName string)
 }
 
 // Deps are the things the API handlers depend on.
@@ -61,6 +65,9 @@ type Deps struct {
 	DB         Pinger
 	Accounts   Accounts
 	Chat       Chat
+	Files      Files    // uploads (nil: upload routes are not registered, e.g. in tests)
+	Profiles   Profiles // change your display name (nil: not registered)
+	Avatars    Avatars  // avatar pictures (nil: not registered)
 	Realtime   Realtime
 	Logger     *slog.Logger
 }
@@ -98,6 +105,26 @@ func NewHandler(d Deps) http.Handler {
 	// Edits share the same limit (an edit is a new text, like a message).
 	mux.HandleFunc("PATCH /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleEditMessage(d.Chat, d.Realtime, d.Logger))))
 	mux.HandleFunc("DELETE /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, handleDeleteMessage(d.Chat, d.Realtime, d.Logger)))
+	mux.HandleFunc("PUT /api/v1/channels/{id}/read", requireAuth(d.Accounts, d.Logger, handleMarkRead(d.Chat, d.Realtime, d.Logger)))
+
+	// Your profile (M6): display name and avatar. At most 10 changes a minute per user.
+	profileLimit := newIPRateLimiter(10, 5)
+	if d.Profiles != nil {
+		mux.HandleFunc("PATCH /api/v1/me", requireAuth(d.Accounts, d.Logger, profileLimit.limitUser(handleUpdateProfile(d.Profiles, d.Realtime, d.Logger))))
+	}
+	if d.Profiles != nil && d.Avatars != nil {
+		mux.HandleFunc("PUT /api/v1/me/avatar", requireAuth(d.Accounts, d.Logger, profileLimit.limitUser(handleSetAvatar(d.Avatars, d.Profiles, d.Realtime, d.Logger))))
+		mux.HandleFunc("DELETE /api/v1/me/avatar", requireAuth(d.Accounts, d.Logger, profileLimit.limitUser(handleRemoveAvatar(d.Avatars, d.Profiles, d.Realtime, d.Logger))))
+		mux.HandleFunc("GET /api/v1/avatars/{key}", requireAuth(d.Accounts, d.Logger, handleGetAvatar(d.Avatars)))
+	}
+
+	// Files (M6): upload, then attach to a message; downloads need channel access.
+	if d.Files != nil {
+		// 30 uploads a minute per user at most (bursts of 10): stops filling the disk.
+		uploadLimit := newIPRateLimiter(30, 10)
+		mux.HandleFunc("POST /api/v1/attachments", requireAuth(d.Accounts, d.Logger, uploadLimit.limitUser(handleUpload(d.Files, d.Logger))))
+		mux.HandleFunc("GET /api/v1/attachments/{id}", requireAuth(d.Accounts, d.Logger, handleDownload(d.Files, d.Chat, d.Logger)))
+	}
 
 	// Members: list (any logged-in user), role changes, kick, ban (checked in the service).
 	mux.HandleFunc("GET /api/v1/users", requireAuth(d.Accounts, d.Logger, handleListMembers(d.Accounts, d.Logger)))
@@ -236,6 +263,8 @@ func (noRealtime) BroadcastWhere(string, any, func(perm.Role) bool) {}
 func (noRealtime) EndSession(int64)                                 {}
 func (noRealtime) EndUser(int64)                                    {}
 func (noRealtime) UpdateUserRole(int64, perm.Role)                  {}
+func (noRealtime) SendToUser(int64, string, any)                    {}
+func (noRealtime) UpdateUserProfile(int64, string)                  {}
 
 // jsonErrorMessage turns a JSON decoding error into a message for the client. Go's own
 // messages mention internal type names (e.g. "Go struct field registerRequest.username"),

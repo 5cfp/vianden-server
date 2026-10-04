@@ -146,6 +146,7 @@ Every user has exactly one role. Roles are ranked: `owner` > `admin` > `moderato
 | `delete_messages` | delete other people's messages | ✓ | ✓ | ✓ | |
 | `kick_members` | sign a user out on all devices | ✓ | ✓ | ✓ | |
 | `ban_members` | block a user from logging in | ✓ | ✓ | | |
+| `mention_everyone` | `@everyone` pings everyone who can see the channel | ✓ | ✓ | ✓ | |
 
 **Hierarchy rule:** actions on another user (role change, kick, ban) need the permission **and** a target whose role is strictly below yours. A new role must also be below yours. There is exactly one owner; no one can become owner or act on the owner.
 
@@ -156,7 +157,7 @@ New accounts are `member`s; the account created with the setup token is the `own
 ### Account rules
 | Field | Rules |
 |---|---|
-| `username` | 3-32 characters: `a-z`, `0-9`, `_`, `.`, `-`; must start with a letter or digit. Case-insensitive: it is stored in lowercase, and `Osama` and `osama` are the same username. |
+| `username` | 3-32 characters: `a-z`, `0-9`, `_`, `.`, `-`; must start with a letter or digit. Case-insensitive: it is stored in lowercase, and `Osama` and `osama` are the same username. The names `everyone` and `here` are reserved (special mentions). |
 | `display_name` | 1-32 characters, any language and emoji. No control characters or invisible formatting characters (for example right-to-left overrides). Leading and trailing spaces are removed. |
 | `password` | 8-256 characters. Any characters, including spaces and emoji. No other complexity rules. |
 
@@ -251,7 +252,7 @@ Creates an account and logs it in. Use the owner setup token as `invite_code` fo
     "display_name": "Osama",
     "is_owner": true,
     "role": "owner",
-    "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members"]
+    "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone"]
   },
   "token": "vs_3kQ9xZ..."
 }
@@ -265,6 +266,7 @@ Creates an account and logs it in. Use the owner setup token as `invite_code` fo
 | `user.is_owner` | boolean | `true` only for the server owner. |
 | `user.role` | string | `owner`, `admin`, `moderator`, or `member`. See [Roles and permissions](#roles-and-permissions). |
 | `user.permissions` | array of strings | What this user may do. Use it to hide actions; the server checks every request anyway. |
+| `user.avatar` | string or null | URL path of the user's avatar (a 256x256 PNG, e.g. `/api/v1/avatars/3f9c...`), or `null`. Download it with your session token. |
 | `token` | string | Session token. See [Session tokens](#session-tokens). |
 
 - **Errors:** `invalid_request` (400), `invalid_username` (400), `invalid_display_name` (400), `invalid_password` (400), `invalid_invite` (403), `invalid_setup_token` (403), `username_taken` (409).
@@ -328,7 +330,8 @@ Returns the logged-in user. Useful at app start to check whether a stored token 
 ```json
 {
   "user": { "id": 1, "username": "osama", "display_name": "Osama", "is_owner": true,
-            "role": "owner", "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members"] }
+            "role": "owner", "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone"],
+            "avatar": null }
 }
 ```
 
@@ -338,6 +341,32 @@ Example:
 ```
 curl http://127.0.0.1:8080/api/v1/me -H "Authorization: Bearer vs_..."
 ```
+
+### `PATCH /api/v1/me`
+Changes **your own** display name (there is no user id in the request: nobody can change someone else's).
+
+- **Auth:** session token.
+- **Request body:** `{ "display_name": "Sara 🌙" }` ([account rules](#account-rules) apply; spaces around it are removed).
+- **Response `200 OK`:** `{ "user": <user object> }`. Everyone connected receives [`member.updated`](#memberupdated).
+- **Errors:** `invalid_request` (400), `invalid_display_name` (400), `unauthorized` (401), `rate_limited` (429).
+
+### `PUT /api/v1/me/avatar`
+Sets your avatar. The body is the **raw image** (PNG, JPEG, GIF or WebP; at most 5 MB and 4096x4096 pixels).
+
+- The server crops the picture to its center square and re-draws it as a **256x256 PNG**. Only the pixels are kept: no metadata (location, camera), nothing hidden. Every new avatar gets a new URL; the old file is deleted.
+- **Auth:** session token.
+- **Response `200 OK`:** `{ "user": <user object> }` with the new `avatar`. Everyone connected receives [`member.updated`](#memberupdated).
+- **Errors:** `invalid_avatar` (400: not a supported image, or too many pixels), `unauthorized` (401), `file_too_large` (413), `rate_limited` (429).
+
+### `DELETE /api/v1/me/avatar`
+Removes your avatar. **Response `200 OK`:** `{ "user": <user object> }` (`avatar: null`); everyone receives `member.updated`.
+
+### `GET /api/v1/avatars/{key}`
+Downloads an avatar (the `avatar` URL from a user or member object).
+
+- **Auth:** session token.
+- **Response `200 OK`:** `image/png`, with `X-Content-Type-Options: nosniff` and `Cache-Control: private, max-age=31536000, immutable` (an avatar URL never changes; a new avatar has a new URL).
+- **Errors:** `unauthorized` (401), `not_found` (404).
 
 ### `POST /api/v1/invites`
 Creates an invite code.
@@ -408,7 +437,7 @@ Deletes an invite. Its code stops working immediately (use this if a code leaked
 |---|---|
 | Channel `name` | 1-32 characters after trimming spaces; any language and emoji; no control or invisible formatting characters. Unique, ignoring case. |
 | Channel `topic` | 0-120 characters, same character rules as names. |
-| Message `content` | 1-4000 characters; must contain more than whitespace. Line breaks (`\n`) and tabs are allowed; `\r\n` is stored as `\n`. No other control characters. Leading and trailing spaces are kept. |
+| Message `content` | 1-4000 characters; must contain more than whitespace (a message with attachments may have no text: `""`). Line breaks (`\n`) and tabs are allowed; `\r\n` is stored as `\n`. No other control characters. Leading and trailing spaces are kept. |
 
 Every new server has one channel, **General**. Each channel has a **minimum role to see it** (`view_role`) and a **minimum role to write in it** (`send_role`, never lower than `view_role`). Examples: an announcements channel (`view_role: member`, `send_role: moderator`) is read-only for members; a staff channel (`view_role: moderator`) is invisible to members. Only users with the `manage_channels` permission can create, change, or delete channels.
 
@@ -427,6 +456,9 @@ Managers can only change or delete channels they can see themselves, and cannot 
 | `view_role` | string | Minimum role to see the channel: `owner`, `admin`, `moderator`, or `member`. |
 | `send_role` | string | Minimum role to write in it. Compare with your own role (order: owner > admin > moderator > member) to decide whether to show the message box. |
 | `last_message` | object or null | Preview of the newest message: `author_name` (string; empty if the account was deleted), `content` (at most 100 characters, then `…`), `created_at` (RFC 3339, UTC). `null` if the channel has no messages. Only in `GET /channels`; `null` in create/update responses. |
+| `last_read_id` | integer | The newest message **you** have read in this channel (0 = none). Messages with a higher id are new for you. |
+| `unread_count` | integer | How many messages newer than `last_read_id` exist (not counting your own, deleted ones, or messages from before your account existed). **Stops at 100**: show "99+" for 100. |
+| `mention_count` | integer | How many of those unread messages mention you (`@you`, `@everyone`, or a reply to you). Also stops at 100. |
 
 #### Message object
 | Field | Type | Meaning |
@@ -439,6 +471,9 @@ Managers can only change or delete channels they can see themselves, and cannot 
 | `deleted` | boolean | `true` if its author or a moderator deleted it. Then `content` is `""` (the text is erased on the server, not hidden); show a placeholder such as "Message deleted". `author` stays, so the conversation still makes sense. |
 | `edited_at` | string or null | When the author last edited the text (RFC 3339, UTC); `null` if never edited. Show a small "(edited)" mark. |
 | `reply_to` | object or null | If this message is a **reply**: a short quote of the message it answers, with `id`, `author` (as above; `null` if that account was deleted), `content` (at most 100 characters, then `…`; `""` if the original was deleted), and `deleted` (boolean). Show it above the message; the `id` lets the client jump to the original. `null` for normal messages. When the original is later edited or deleted, the stored reply is not changed, but clients receive [`message.updated`](#messageupdated) / [`message.deleted`](#messagedeleted) for the original and can update quotes they show. |
+| `mentions` | array | Who this message **pings**: users written as `@username` (case-insensitive) who can see the channel, plus the author of the message it replies to. Each item is `{ id, username, display_name }`. Never `null` (empty array). Highlight the message if you are in it. |
+| `mentions_everyone` | boolean | `true` if it contains `@everyone` **and** its author has the `mention_everyone` permission (otherwise `@everyone` is just text). Pings everyone who can see the channel. |
+| `attachments` | array | Files sent with the message, each an [attachment object](#attachment-object). Never `null`. A deleted message has none (its files are deleted too). |
 
 ### `GET /api/v1/channels`
 Lists all channels in room-list order, each with a preview of its newest message.
@@ -451,9 +486,13 @@ Lists all channels in room-list order, each with a preview of its newest message
   "channels": [
     {
       "id": 1, "name": "General", "topic": "Everything and nothing", "type": "text", "position": 0,
-      "last_message": { "author_name": "Sara", "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z" }
+      "view_role": "member", "send_role": "member",
+      "last_message": { "author_name": "Sara", "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z" },
+      "last_read_id": 40, "unread_count": 2, "mention_count": 1
     },
-    { "id": 2, "name": "Games", "topic": "", "type": "text", "position": 1, "last_message": null }
+    { "id": 2, "name": "Games", "topic": "", "type": "text", "position": 1,
+      "view_role": "member", "send_role": "member", "last_message": null,
+      "last_read_id": 0, "unread_count": 0, "mention_count": 0 }
   ]
 }
 ```
@@ -503,12 +542,13 @@ Returns one page of a channel's history, **oldest first** within the page.
   "messages": [
     { "id": 41, "channel_id": 1, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
       "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z",
-      "deleted": false, "edited_at": null, "reply_to": null },
+      "deleted": false, "edited_at": null, "reply_to": null, "mentions": [], "mentions_everyone": false, "attachments": [] },
     { "id": 42, "channel_id": 1, "author": { "id": 1, "username": "osama", "display_name": "Osama" },
       "content": "In 20 minutes.", "created_at": "2026-10-04T18:43:00Z",
       "deleted": false, "edited_at": "2026-10-04T18:44:00Z",
       "reply_to": { "id": 41, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
-                    "content": "Anyone up for a round tonight?", "deleted": false } }
+                    "content": "Anyone up for a round tonight?", "deleted": false },
+      "mentions": [{ "id": 2, "username": "sara", "display_name": "Sara" }], "mentions_everyone": false, "attachments": [] }
   ],
   "has_more": true
 }
@@ -529,9 +569,10 @@ Sends a message as the logged-in user.
 - **Auth:** session token
 - **Request body:** `{ "content": "Hello!" }`, or for a reply `{ "content": "Agreed!", "reply_to": 42 }`. `reply_to` (optional) is the id of a message **in the same channel** that is not deleted; otherwise the request fails with `invalid_reply_to`. (A reply cannot quote a message from another channel: that could show text from a channel the readers cannot see.)
 - **Response `201 Created`:** `{ "message": <message object> }`
-- **Errors:** `invalid_request` (400), `invalid_content` (400), `invalid_reply_to` (400), `unauthorized` (401), `read_only` (403), `not_found` (404), `rate_limited` (429).
+- **Errors:** `invalid_request` (400), `invalid_content` (400), `invalid_reply_to` (400), `invalid_attachments` (400), `unauthorized` (401), `read_only` (403), `not_found` (404), `rate_limited` (429).
 - **Rate limited** per user (see [Rate limits](#rate-limits)).
 - Every connected client (including the sender's other devices) also receives the new message as a [`message.created`](#messagecreated) WebSocket event.
+- **Files:** upload each one first ([`POST /api/v1/attachments`](#post-apiv1attachments)), then send their ids: `{ "content": "", "attachments": [7, 8] }`. At most 10. Only your own uploads that are not attached to a message yet; otherwise `invalid_attachments` (and nothing is sent).
 
 ### `PATCH /api/v1/channels/{id}/messages/{mid}`
 Edits the text of one of **your own** messages. Nobody can edit someone else's message, not even the owner.
@@ -541,12 +582,50 @@ Edits the text of one of **your own** messages. Nobody can edit someone else's m
 - **Response `200 OK`:** `{ "message": <message object> }` with `edited_at` set. Everyone who can see the channel receives [`message.updated`](#messageupdated).
 - **Errors:** `invalid_request` (400), `invalid_content` (400), `unauthorized` (401), `forbidden` (403: not your message), `read_only` (403), `not_found` (404: unknown or deleted message, or a channel you cannot see), `rate_limited` (429, shared with sending).
 
+### `PUT /api/v1/channels/{id}/read`
+Marks the channel as read up to a message (call it when the user looks at the channel, and when new messages arrive while they do).
+
+- **Auth:** session token; you must be able to see the channel.
+- **Request body:** `{ "message_id": 57 }`. The marker only moves **forward** (an older id is ignored) and never past the newest message. Sending a message marks the channel read up to it automatically.
+- **Response `204 No Content`.** Your other connected devices receive [`channel.read`](#channelread).
+- **Errors:** `invalid_request` (400), `invalid_message_id` (400), `unauthorized` (401), `not_found` (404).
+
 ### `DELETE /api/v1/channels/{id}/messages/{mid}`
 Deletes a message: its text is erased in the database and a placeholder stays (`deleted: true`).
 
 - **Auth:** session token. **Your own messages:** always (even in a channel that became read-only for you). **Someone else's:** permission `delete_messages`, and the author must be **below your role** (messages of deleted accounts can always be removed). You must be able to see the channel.
 - **Response `204 No Content`.** Everyone who can see the channel receives [`message.deleted`](#messagedeleted).
 - **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404: unknown or already deleted message, or a channel you cannot see).
+
+### Attachments (files and images)
+
+Sending a file takes two steps: upload it, then send a message with its id. An upload that is not attached to a message within an hour is deleted.
+
+**Security:** the server decides what a file is from its **content**, never from its name or the request. Only real PNG, JPEG, GIF and WebP images (at most 12000 pixels per side and 50 megapixels) are images; everything else is `application/octet-stream` and is always served as a download. Location and camera data (EXIF, XMP, IPTC, text chunks) is **removed** from JPEG and PNG images (the orientation is kept); WebP and GIF are stored as uploaded. Files are stored under random names; the `filename` is only shown.
+
+#### Attachment object
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Attachment ID. |
+| `filename` | string | Name to show (1-200 characters; no path, no control characters). |
+| `content_type` | string | `image/png`, `image/jpeg`, `image/gif`, `image/webp`, or `application/octet-stream`. Show images inline; offer everything else as a download. |
+| `size` | integer | Size in bytes. |
+| `width`, `height` | integer or null | Pixel size, for images only (to reserve space before the image loads). |
+
+### `POST /api/v1/attachments`
+Uploads one file. The request body is the **raw file** (not a form, not JSON); the name goes in the query string.
+
+- **Auth:** session token.
+- **Request:** `POST /api/v1/attachments?filename=holiday.jpg`, body = the file's bytes. At most **25 MB**; the whole upload must arrive within 5 minutes.
+- **Response `201 Created`:** `{ "attachment": <attachment object> }`. Then send its `id` in [`POST /channels/{id}/messages`](#post-apiv1channelsidmessages).
+- **Errors:** `invalid_filename` (400), `invalid_file` (400: empty), `unauthorized` (401), `file_too_large` (413), `too_many_uploads` (429: 20 uploads waiting to be sent), `rate_limited` (429).
+
+### `GET /api/v1/attachments/{id}`
+Downloads a file.
+
+- **Auth:** session token. Before it is sent: only its uploader. After: everyone who can see the channel of its message. Otherwise `404` (also for files of deleted messages).
+- **Response `200 OK`:** the file. Headers: `Content-Type` (from the attachment object), `Content-Disposition: inline` for images and `attachment` (save as) for everything else, with the file name; `X-Content-Type-Options: nosniff`; `Content-Security-Policy: default-src 'none'; sandbox`. Files never change, so it may be cached (`Cache-Control: private, max-age=31536000, immutable`). `Range` requests are supported.
+- **Errors:** `unauthorized` (401), `not_found` (404).
 
 ### Members
 
@@ -557,6 +636,7 @@ Deletes a message: its text is erased in the database and a placeholder stays (`
 | `username` | string | Login name (lowercase). |
 | `display_name` | string | Name to show. |
 | `role` | string | `owner`, `admin`, `moderator`, or `member`. |
+| `avatar` | string or null | URL path of the avatar, or `null`. Messages do not repeat avatars: clients look them up here, by user id. |
 | `banned` | boolean | Only for viewers with `ban_members`: whether the account is banned. |
 | `banned_at` | string | Only for viewers with `ban_members`, if banned: RFC 3339 time. |
 | `ban_reason` | string | Only for viewers with `ban_members`, if banned: the reason (may be empty). |
@@ -670,7 +750,7 @@ A new message in any channel. `data` is a [message object](#message-object). The
     "id": 43, "channel_id": 1,
     "author": { "id": 2, "username": "sara", "display_name": "Sara" },
     "content": "On my way!", "created_at": "2026-10-04T18:44:00Z",
-    "deleted": false, "edited_at": null, "reply_to": null } }
+    "deleted": false, "edited_at": null, "reply_to": null, "mentions": [], "mentions_everyone": false, "attachments": [] } }
 ```
 
 #### `channel.created`, `channel.updated`, `channel.deleted`
@@ -684,7 +764,7 @@ A message was edited by its author. `data` is the full [message object](#message
 ```json
 { "type": "message.updated", "data": { "id": 43, "channel_id": 1, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
     "content": "Fixed the typo", "created_at": "2026-10-04T18:30:00Z", "deleted": false,
-    "edited_at": "2026-10-04T18:31:00Z", "reply_to": null } }
+    "edited_at": "2026-10-04T18:31:00Z", "reply_to": null, "mentions": [], "mentions_everyone": false, "attachments": [] } }
 ```
 
 #### `message.deleted`
@@ -693,8 +773,14 @@ A message was deleted by its author or a moderator. Replace it with a placeholde
 { "type": "message.deleted", "data": { "id": 43, "channel_id": 1 } }
 ```
 
+#### `channel.read`
+You (on this or another device) read a channel up to `last_read_id`: clear its unread and mention badges. Only sent to your own connections.
+```json
+{ "type": "channel.read", "data": { "channel_id": 1, "last_read_id": 57 } }
+```
+
 #### `member.updated`
-A user's role changed. `data` is a [member object](#member-object) (without ban details). If it is **you**, reload your own user (`GET /api/v1/me`) and the room list: your permissions and the channels you can see may have changed.
+A user's role, display name, or avatar changed. `data` is a [member object](#member-object) (without ban details). If it is **you**, reload your own user (`GET /api/v1/me`) and the room list: your permissions and the channels you can see may have changed.
 ```json
 { "type": "member.updated", "data": { "id": 2, "username": "sara", "display_name": "Sara", "role": "moderator" } }
 ```
@@ -736,6 +822,8 @@ Unknown or malformed client messages are ignored.
 |---|---|
 | `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
 | `POST /channels/{id}/messages` and `PATCH /channels/{id}/messages/{mid}` (shared) | 10 messages at once, then 1 more per second, **per user** |
+| `POST /attachments` | 10 at once, then 1 more every 2 seconds, **per user**; at most 20 uploads waiting to be sent |
+| `PATCH /me`, `PUT`/`DELETE /me/avatar` (shared) | 5 at once, then 1 more every 6 seconds, **per user** |
 | `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes and 10 per second (bursts of 20); `typing` forwarded at most every 2 s per channel and 1 s overall |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
@@ -760,3 +848,6 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added per-channel `view_role` and `send_role` (channel object, create, update); hidden channels answer 404; new error `read_only`; live events are only sent to users who may see the channel.
 - Added `DELETE /api/v1/channels/{id}/messages/{mid}`, the message field `deleted`, and the WebSocket event `message.deleted`. Room-list previews skip deleted messages.
 - Added replies (`reply_to` in the send request and in message objects), message editing (`PATCH /api/v1/channels/{id}/messages/{mid}`, field `edited_at`, WebSocket event `message.updated`), and deleting your own messages. New error `invalid_reply_to`.
+- Added mentions (`mentions`, `mentions_everyone` in message objects; permission `mention_everyone`; the usernames `everyone` and `here` are reserved) and unread tracking (`last_read_id`, `unread_count`, `mention_count` in `GET /channels`; `PUT /api/v1/channels/{id}/read`; WebSocket event `channel.read`). A reply now pings the author of the original.
+- Added attachments: `POST /api/v1/attachments`, `GET /api/v1/attachments/{id}`, `attachments` in the send request and in message objects, errors `invalid_attachments`, `invalid_filename`, `invalid_file`, `file_too_large`, `too_many_uploads`. A message with attachments may have empty `content`.
+- Added profiles: `PATCH /api/v1/me` (display name), `PUT`/`DELETE /api/v1/me/avatar`, `GET /api/v1/avatars/{key}`, `avatar` in user and member objects; `member.updated` is now also sent when a display name or avatar changes. New error `invalid_avatar`.

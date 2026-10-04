@@ -16,13 +16,14 @@ type memberResponse struct {
 	Username    string     `json:"username"`
 	DisplayName string     `json:"display_name"`
 	Role        string     `json:"role"`
+	Avatar      *string    `json:"avatar"` // URL path of the avatar, or null
 	Banned      *bool      `json:"banned,omitempty"`
 	BannedAt    *time.Time `json:"banned_at,omitempty"`
 	BanReason   *string    `json:"ban_reason,omitempty"`
 }
 
 func toMemberResponse(m accounts.Member, showBan bool) memberResponse {
-	r := memberResponse{ID: m.ID, Username: m.Username, DisplayName: m.DisplayName, Role: string(m.Role)}
+	r := memberResponse{ID: m.ID, Username: m.Username, DisplayName: m.DisplayName, Role: string(m.Role), Avatar: avatarURL(m.AvatarKey)}
 	if showBan {
 		banned := m.BannedAt != nil
 		r.Banned = &banned

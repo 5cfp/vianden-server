@@ -16,11 +16,11 @@ func TestParseRole(t *testing.T) {
 }
 
 func TestPermissionTable(t *testing.T) {
-	// The table from PROJECT_PLAN.md, M5. If you change a role's permissions, change both.
+	// The table from PROJECT_PLAN.md (M5, + mention_everyone in M6). If you change a role's permissions, change both.
 	want := map[Role]map[Permission]bool{
-		Owner:     {ManageChannels: true, ManageInvites: true, ManageRoles: true, DeleteMessages: true, KickMembers: true, BanMembers: true},
-		Admin:     {ManageChannels: true, ManageInvites: true, ManageRoles: true, DeleteMessages: true, KickMembers: true, BanMembers: true},
-		Moderator: {DeleteMessages: true, KickMembers: true},
+		Owner:     {ManageChannels: true, ManageInvites: true, ManageRoles: true, DeleteMessages: true, KickMembers: true, BanMembers: true, MentionEveryone: true},
+		Admin:     {ManageChannels: true, ManageInvites: true, ManageRoles: true, DeleteMessages: true, KickMembers: true, BanMembers: true, MentionEveryone: true},
+		Moderator: {DeleteMessages: true, KickMembers: true, MentionEveryone: true},
 		Member:    {},
 	}
 	for role, perms := range want {

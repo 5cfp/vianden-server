@@ -14,6 +14,7 @@ import (
 // fakeRealtime records what the API publishes.
 type fakeRealtime struct {
 	mu          sync.Mutex
+	sentTo      []int64 // SendToUser targets (events are recorded in events/data too)
 	events      []string
 	data        []any
 	ended       []int64
@@ -181,3 +182,14 @@ func TestReadOnlyError(t *testing.T) {
 		t.Errorf("status %d", rec.Code)
 	}
 }
+
+func (f *fakeRealtime) SendToUser(id int64, t string, d any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sentTo = append(f.sentTo, id)
+	f.filters = append(f.filters, nil) // keeps filters[i] in step with events[i]
+	f.events = append(f.events, t)
+	f.data = append(f.data, d)
+}
+
+func (f *fakeRealtime) UpdateUserProfile(int64, string) {}

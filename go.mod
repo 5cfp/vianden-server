@@ -9,6 +9,7 @@ require (
 	github.com/pressly/goose/v3 v3.28.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/crypto/x509roots/fallback v0.0.0-20260929172509-b39ff6d641ec
+	golang.org/x/image v0.46.0
 	golang.org/x/time v0.16.0
 )
 

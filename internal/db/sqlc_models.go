@@ -6,7 +6,22 @@ package db
 
 import (
 	"time"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+type Attachment struct {
+	ID          int64
+	UploaderID  *int64
+	MessageID   *int64
+	Filename    string
+	ContentType string
+	Size        int64
+	Width       pgtype.Int4
+	Height      pgtype.Int4
+	StorageKey  string
+	CreatedAt   time.Time
+}
 
 type Channel struct {
 	ID        int64
@@ -30,15 +45,27 @@ type Invite struct {
 }
 
 type Message struct {
-	ID        int64
-	ChannelID int64
-	AuthorID  *int64
-	Content   string
-	CreatedAt time.Time
-	DeletedAt *time.Time
-	DeletedBy *int64
-	ReplyToID *int64
-	EditedAt  *time.Time
+	ID               int64
+	ChannelID        int64
+	AuthorID         *int64
+	Content          string
+	CreatedAt        time.Time
+	DeletedAt        *time.Time
+	DeletedBy        *int64
+	ReplyToID        *int64
+	EditedAt         *time.Time
+	MentionsEveryone bool
+}
+
+type MessageMention struct {
+	MessageID int64
+	UserID    int64
+}
+
+type ReadState struct {
+	UserID     int64
+	ChannelID  int64
+	LastReadID int64
 }
 
 type Session struct {
@@ -60,4 +87,5 @@ type User struct {
 	Role         string
 	BannedAt     *time.Time
 	BanReason    string
+	AvatarKey    *string
 }

@@ -36,8 +36,14 @@ func validateUsername(username string) error {
 		return &ValidationError{"username",
 			"must be 3-32 characters: letters, digits, '_', '.', '-', starting with a letter or digit"}
 	}
+	// "@everyone" (and "@here", kept free for later) are special mentions, not people.
+	if reservedUsernames[username] {
+		return &ValidationError{"username", "this name is reserved"}
+	}
 	return nil
 }
+
+var reservedUsernames = map[string]bool{"everyone": true, "here": true}
 
 func validateDisplayName(name string) error {
 	n := utf8.RuneCountInString(name)

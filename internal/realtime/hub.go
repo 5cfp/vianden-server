@@ -421,3 +421,31 @@ func (h *Hub) SetChannelAccess(f ChannelAccessFunc) {
 	defer h.mu.Unlock()
 	h.channelAccess = f
 }
+
+// SendToUser sends an event to every open connection of one user (their other devices),
+// e.g. "you read this channel" so all of them clear the unread badge.
+func (h *Hub) SendToUser(userID int64, eventType string, data any) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	msg := mustJSON(Event{eventType, data})
+	for c := range h.clients {
+		if c.user.ID == userID {
+			h.enqueue(c, msg)
+		}
+	}
+}
+
+// UpdateUserProfile changes a user's display name on their open connections and in the
+// online list, so presence events and typing show the new name.
+func (h *Hub) UpdateUserProfile(userID int64, displayName string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.user.ID == userID {
+			c.user.DisplayName = displayName
+		}
+	}
+	if o := h.online[userID]; o != nil {
+		o.info.DisplayName = displayName
+	}
+}

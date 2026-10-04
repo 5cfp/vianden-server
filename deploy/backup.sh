@@ -1,6 +1,6 @@
 #!/bin/sh
-# Makes a database backup every BACKUP_INTERVAL_HOURS and deletes backups older than
-# BACKUP_KEEP_DAYS. Runs inside the "backup" container (see docker-compose.yml).
+# Makes a database backup (and an archive of uploaded files and avatars) every
+# BACKUP_INTERVAL_HOURS and deletes backups older than BACKUP_KEEP_DAYS. Runs inside the "backup" container (see docker-compose.yml).
 #
 # Backups contain ALL messages and the password hashes: they are as sensitive as the
 # database itself. Files are readable by their owner only, and should also be copied
@@ -22,6 +22,23 @@ while true; do
     rm -f "$tmp"
     echo "backup: FAILED at $stamp" >&2
   fi
+  # Uploaded files and avatars live in the server's data volume (mounted read-only here).
+  dirs=""
+  for d in uploads avatars; do
+    if [ -d "/data/$d" ]; then dirs="$dirs $d"; fi
+  done
+  if [ -n "$dirs" ]; then
+    ftmp="/backups/.vianden-files-$stamp.tar.gz.partial"
+    # shellcheck disable=SC2086 # $dirs is a list of folder names on purpose
+    if tar -czf "$ftmp" -C /data $dirs; then
+      mv "$ftmp" "/backups/vianden-files-$stamp.tar.gz"
+      echo "backup: wrote vianden-files-$stamp.tar.gz ($(du -h "/backups/vianden-files-$stamp.tar.gz" | cut -f1))"
+    else
+      rm -f "$ftmp"
+      echo "backup: FILES FAILED at $stamp" >&2
+    fi
+  fi
   find /backups -name 'vianden-*.dump' -mtime +"$BACKUP_KEEP_DAYS" -delete
+  find /backups -name 'vianden-files-*.tar.gz' -mtime +"$BACKUP_KEEP_DAYS" -delete
   sleep $((BACKUP_INTERVAL_HOURS * 3600))
 done

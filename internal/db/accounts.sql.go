@@ -29,7 +29,7 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 const createUser = `-- name: CreateUser :one
 INSERT INTO users (username, display_name, password_hash, role)
 VALUES ($1, $2, $3, $4)
-RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason
+RETURNING id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key
 `
 
 type CreateUserParams struct {
@@ -56,6 +56,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 		&i.Role,
 		&i.BannedAt,
 		&i.BanReason,
+		&i.AvatarKey,
 	)
 	return i, err
 }
@@ -74,7 +75,7 @@ func (q *Queries) DeleteOldSessions(ctx context.Context) (int64, error) {
 }
 
 const getActiveSession = `-- name: GetActiveSession :one
-SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.last_used_at, sessions.expires_at, sessions.revoked_at, users.id, users.username, users.display_name, users.password_hash, users.created_at, users.role, users.banned_at, users.ban_reason
+SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.last_used_at, sessions.expires_at, sessions.revoked_at, users.id, users.username, users.display_name, users.password_hash, users.created_at, users.role, users.banned_at, users.ban_reason, users.avatar_key
 FROM sessions
 JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = $1
@@ -108,12 +109,13 @@ func (q *Queries) GetActiveSession(ctx context.Context, tokenHash []byte) (GetAc
 		&i.User.Role,
 		&i.User.BannedAt,
 		&i.User.BanReason,
+		&i.User.AvatarKey,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason FROM users WHERE username = $1
+SELECT id, username, display_name, password_hash, created_at, role, banned_at, ban_reason, avatar_key FROM users WHERE username = $1
 `
 
 func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User, error) {
@@ -128,6 +130,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 		&i.Role,
 		&i.BannedAt,
 		&i.BanReason,
+		&i.AvatarKey,
 	)
 	return i, err
 }

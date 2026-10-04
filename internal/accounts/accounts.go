@@ -69,6 +69,7 @@ type User struct {
 	Username    string
 	DisplayName string
 	Role        perm.Role
+	AvatarKey   string // file name of the avatar; "" = none (M6)
 }
 
 // IsOwner reports whether the user is the server owner.

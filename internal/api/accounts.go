@@ -25,6 +25,7 @@ type userResponse struct {
 	Role        string `json:"role"`
 	// What this user may do. Lets clients hide buttons; the server still checks every request.
 	Permissions []perm.Permission `json:"permissions"`
+	Avatar      *string           `json:"avatar"` // URL path of the avatar, or null
 }
 
 type sessionResponse struct {
@@ -36,6 +37,7 @@ func toUserResponse(u accounts.User) userResponse {
 	return userResponse{
 		ID: u.ID, Username: u.Username, DisplayName: u.DisplayName,
 		IsOwner: u.IsOwner(), Role: string(u.Role), Permissions: u.Role.Permissions(),
+		Avatar: avatarURL(u.AvatarKey),
 	}
 }
 

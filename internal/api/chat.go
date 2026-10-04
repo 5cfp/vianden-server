@@ -20,8 +20,10 @@ type Chat interface {
 	CreateChannel(ctx context.Context, by accounts.User, set chat.ChannelSettings) (chat.Channel, error)
 	UpdateChannel(ctx context.Context, by accounts.User, id int64, ch chat.ChannelChanges) (chat.Channel, perm.Role, error)
 	DeleteChannel(ctx context.Context, by accounts.User, id int64) (chat.Channel, error)
-	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64) (chat.Message, chat.Channel, error)
+	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64, attachments []int64) (chat.Message, chat.Channel, error)
+	Channel(ctx context.Context, viewer accounts.User, id int64) (chat.Channel, error)
 	EditMessage(ctx context.Context, by accounts.User, channelID, messageID int64, content string) (chat.Message, chat.Channel, error)
+	MarkRead(ctx context.Context, by accounts.User, channelID, messageID int64) (int64, error)
 	ListMessages(ctx context.Context, viewer accounts.User, channelID, before int64, limit int) ([]chat.Message, bool, error)
 	DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (chat.Channel, error)
 }
@@ -35,6 +37,11 @@ type channelResponse struct {
 	ViewRole    string           `json:"view_role"`    // minimum role to see the channel
 	SendRole    string           `json:"send_role"`    // minimum role to write in it
 	LastMessage *previewResponse `json:"last_message"` // null when the channel has no messages
+	// For you: newest message you read, and how many newer ones (and mentions of you) exist.
+	// Counts stop at 100. Only meaningful in GET /channels (0 in events).
+	LastReadID   int64 `json:"last_read_id"`
+	UnreadCount  int   `json:"unread_count"`
+	MentionCount int   `json:"mention_count"`
 }
 
 type previewResponse struct {
@@ -56,9 +63,12 @@ type messageResponse struct {
 	Content   string          `json:"content"`
 	CreatedAt time.Time       `json:"created_at"`
 	// Deleted by its author or a moderator: content is "" and should be shown as "Message deleted".
-	Deleted  bool           `json:"deleted"`
-	EditedAt *time.Time     `json:"edited_at"` // null if never edited
-	ReplyTo  *replyResponse `json:"reply_to"`  // null if not a reply
+	Deleted          bool                 `json:"deleted"`
+	EditedAt         *time.Time           `json:"edited_at"`         // null if never edited
+	ReplyTo          *replyResponse       `json:"reply_to"`          // null if not a reply
+	Mentions         []authorResponse     `json:"mentions"`          // who it pings (never null)
+	MentionsEveryone bool                 `json:"mentions_everyone"` // it pinged @everyone
+	Attachments      []attachmentResponse `json:"attachments"`       // never null
 }
 
 // replyResponse is the quote of the message a reply answers.
@@ -73,6 +83,7 @@ func toChannelResponse(c chat.Channel) channelResponse {
 	r := channelResponse{
 		ID: c.ID, Name: c.Name, Topic: c.Topic, Type: c.Type, Position: c.Position,
 		ViewRole: string(c.ViewRole), SendRole: string(c.SendRole),
+		LastReadID: c.LastReadID, UnreadCount: c.UnreadCount, MentionCount: c.MentionCount,
 	}
 	if p := c.LastMessage; p != nil {
 		r.LastMessage = &previewResponse{AuthorName: p.AuthorName, Content: p.Content, CreatedAt: p.CreatedAt.UTC()}
@@ -81,7 +92,15 @@ func toChannelResponse(c chat.Channel) channelResponse {
 }
 
 func toMessageResponse(m chat.Message) messageResponse {
-	r := messageResponse{ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt.UTC(), Deleted: m.Deleted}
+	r := messageResponse{ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt.UTC(), Deleted: m.Deleted,
+		Mentions: make([]authorResponse, len(m.Mentions)), MentionsEveryone: m.MentionsEveryone,
+		Attachments: make([]attachmentResponse, len(m.Attachments))}
+	for i, a := range m.Attachments {
+		r.Attachments[i] = toAttachmentResponse(a)
+	}
+	for i, a := range m.Mentions {
+		r.Mentions[i] = authorResponse{ID: a.ID, Username: a.Username, DisplayName: a.DisplayName}
+	}
 	if a := m.Author; a != nil {
 		r.Author = &authorResponse{ID: a.ID, Username: a.Username, DisplayName: a.DisplayName}
 	}
@@ -263,15 +282,16 @@ func handleSendMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler
 			return
 		}
 		var req struct {
-			Content string `json:"content"`
-			ReplyTo *int64 `json:"reply_to"` // optional: id of the message this answers
+			Content     string  `json:"content"`
+			ReplyTo     *int64  `json:"reply_to"`    // optional: id of the message this answers
+			Attachments []int64 `json:"attachments"` // optional: ids from POST /attachments
 		}
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
 		// Message text is never logged: it is private conversation.
-		m, ch, err := svc.SendMessage(r.Context(), s.User, id, req.Content, deref(req.ReplyTo))
+		m, ch, err := svc.SendMessage(r.Context(), s.User, id, req.Content, deref(req.ReplyTo), req.Attachments)
 		if err != nil {
 			writeServiceError(w, logger, "send message", err)
 			return
@@ -356,5 +376,34 @@ func handleEditMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler
 		writeJSON(w, http.StatusOK, struct {
 			Message messageResponse `json:"message"`
 		}{resp})
+	}
+}
+
+func handleMarkRead(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
+		id, ok := pathID(r, "id")
+		if !ok {
+			writeError(w, http.StatusNotFound, "not_found", chat.ErrChannelNotFound.Error())
+			return
+		}
+		var req struct {
+			MessageID int64 `json:"message_id"`
+		}
+		if err := decodeJSON(w, r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if req.MessageID < 0 {
+			writeError(w, http.StatusBadRequest, "invalid_message_id", "message_id must be a message id")
+			return
+		}
+		last, err := svc.MarkRead(r.Context(), s.User, id, req.MessageID)
+		if err != nil {
+			writeServiceError(w, logger, "mark read", err)
+			return
+		}
+		// The user's other devices clear their badge too.
+		rt.SendToUser(s.User.ID, "channel.read", map[string]int64{"channel_id": id, "last_read_id": last})
+		w.WriteHeader(http.StatusNoContent)
 	}
 }

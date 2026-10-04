@@ -48,7 +48,7 @@ services:
       - "443:8443" # HTTPS: the app and its WebSocket
       - "80:8080" # HTTP: Let's Encrypt domain check + redirect to HTTPS
     volumes:
-      - serverdata:/data # certificates
+      - serverdata:/data # certificates, uploaded files, avatars
     # Hardening: the container cannot write anywhere except /data, has no Linux
     # capabilities, and its processes can never gain more privileges.
     read_only: true
@@ -71,6 +71,7 @@ services:
     volumes:
       - ./backups:/backups
       - ./backup.sh:/backup.sh:ro
+      - serverdata:/data:ro # uploaded files and avatars (read-only: they are only copied)
     entrypoint: ["/bin/sh", "/backup.sh"]
 
 volumes:

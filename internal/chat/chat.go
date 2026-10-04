@@ -19,6 +19,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/files"
 	"github.com/5cfp/vianden-server/internal/perm"
 )
 
@@ -27,6 +28,7 @@ const (
 	MaxChannelNameLength  = 32
 	MaxChannelTopicLength = 120
 	MaxMessageLength      = 4000
+	MaxAttachments        = 10
 	DefaultPageSize       = 50
 	MaxPageSize           = 100
 	previewLength         = 100 // characters of the last message shown in the room list
@@ -50,6 +52,11 @@ type Channel struct {
 	ViewRole    perm.Role // minimum role to see the channel and its messages
 	SendRole    perm.Role // minimum role to write in it (never below ViewRole)
 	LastMessage *Preview
+	// For the viewer (only filled by ListChannels): the newest message they have read,
+	// how many newer ones there are, and how many of those mention them (both max 100).
+	LastReadID   int64
+	UnreadCount  int
+	MentionCount int
 }
 
 // CanView reports whether a user with this role may see the channel.
@@ -79,6 +86,12 @@ type Message struct {
 	EditedAt *time.Time
 	// ReplyTo: the message this one answers (a short quote); nil if it is not a reply.
 	ReplyTo *ReplyPreview
+	// Mentions: who this message pings (@username, and the author of the message it
+	// replies to). MentionsEveryone: it pinged @everyone (author allowed to).
+	Mentions         []Author
+	MentionsEveryone bool
+	// Attachments: uploaded files sent with this message (none once it is deleted).
+	Attachments []files.Attachment
 }
 
 // ReplyPreview is the quote shown above a reply.
@@ -112,11 +125,12 @@ type ChannelChanges struct {
 }
 
 type Service struct {
+	pool    *pgxpool.Pool // for transactions
 	queries *db.Queries
 }
 
 func NewService(pool *pgxpool.Pool) *Service {
-	return &Service{queries: db.New(pool)}
+	return &Service{pool: pool, queries: db.New(pool)}
 }
 
 // ListChannels returns the channels the viewer may see, in room-list order.
@@ -143,7 +157,30 @@ func (s *Service) ListChannels(ctx context.Context, viewer accounts.User) ([]Cha
 		}
 		channels = append(channels, c)
 	}
+
+	// Unread counts for this viewer, matched to the channels by id.
+	counts, err := s.queries.UnreadCounts(ctx, viewer.ID)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[int64]db.UnreadCountsRow, len(counts))
+	for _, u := range counts {
+		byID[u.ChannelID] = u
+	}
+	for i := range channels {
+		u := byID[channels[i].ID]
+		channels[i].LastReadID, channels[i].UnreadCount, channels[i].MentionCount = u.LastReadID, int(u.UnreadCount), int(u.MentionCount)
+	}
 	return channels, nil
+}
+
+// MarkRead records that the user has read the channel up to messageID (the marker only
+// moves forward). Returns the new marker, for the user's other devices.
+func (s *Service) MarkRead(ctx context.Context, by accounts.User, channelID, messageID int64) (int64, error) {
+	if _, err := s.Channel(ctx, by, channelID); err != nil {
+		return 0, err
+	}
+	return s.queries.MarkRead(ctx, db.MarkReadParams{UserID: by.ID, ChannelID: channelID, MessageID: messageID})
 }
 
 // Channel returns one channel, if the viewer may see it (used for access checks elsewhere).
@@ -258,8 +295,12 @@ func (s *Service) DeleteChannel(ctx context.Context, by accounts.User, id int64)
 
 // SendMessage posts a message to a channel as the given user. replyTo is the id of the
 // message it answers, or 0 for a normal message.
-func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64) (Message, Channel, error) {
-	content, err := cleanMessage(content)
+func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string, replyTo int64, attachments []int64) (Message, Channel, error) {
+	attachments = unique(attachments)
+	if len(attachments) > MaxAttachments {
+		return Message{}, Channel{}, &accounts.ValidationError{Field: "attachments", Message: "at most 10 files per message"}
+	}
+	content, err := cleanContent(content, len(attachments) > 0)
 	if err != nil {
 		return Message{}, Channel{}, err
 	}
@@ -271,22 +312,50 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 		return Message{}, Channel{}, ErrReadOnly
 	}
 
-	params := db.CreateMessageParams{ChannelID: channelID, AuthorID: &by.ID, Content: content}
+	names, everyone := parseMentions(content)
+	params := db.CreateMessageParams{ChannelID: channelID, AuthorID: &by.ID, Content: content,
+		MentionsEveryone: canMentionEveryone(by, everyone)}
+	var replyAuthor int64 // a reply pings the author of the original
 	if replyTo != 0 {
 		// The original must be in THIS channel. Otherwise someone could reply "into" a
 		// channel they can see while quoting a message from one they cannot, and the quote
 		// would leak its text to everyone here.
-		ok, err := s.queries.MessageExists(ctx, db.MessageExistsParams{ID: replyTo, ChannelID: channelID})
+		author, err := s.queries.ReplyTarget(ctx, db.ReplyTargetParams{ID: replyTo, ChannelID: channelID})
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Message{}, Channel{}, &accounts.ValidationError{Field: "reply_to", Message: "no such message in this channel"}
+		}
 		if err != nil {
 			return Message{}, Channel{}, err
 		}
-		if !ok {
-			return Message{}, Channel{}, &accounts.ValidationError{Field: "reply_to", Message: "no such message in this channel"}
+		if author != nil {
+			replyAuthor = *author
 		}
 		params.ReplyToID = &replyTo
 	}
 
-	id, err := s.queries.CreateMessage(ctx, params)
+	// The message, who it pings, and "the sender has read up to here" are saved together.
+	var id int64
+	err = s.withTx(ctx, func(q *db.Queries) error {
+		var err error
+		if id, err = q.CreateMessage(ctx, params); err != nil {
+			return err
+		}
+		if err := saveMentions(ctx, q, id, by, c, names, replyAuthor); err != nil {
+			return err
+		}
+		if len(attachments) > 0 {
+			// Only your own uploads that are not attached to anything yet.
+			linked, err := q.LinkAttachments(ctx, db.LinkAttachmentsParams{MessageID: &id, Ids: attachments, UploaderID: &by.ID})
+			if err != nil {
+				return err
+			}
+			if len(linked) != len(attachments) {
+				return &accounts.ValidationError{Field: "attachments", Message: "unknown upload, or already attached to a message"}
+			}
+		}
+		_, err = q.MarkRead(ctx, db.MarkReadParams{UserID: by.ID, ChannelID: channelID, MessageID: id})
+		return err
+	})
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation: deleted meanwhile
@@ -302,10 +371,6 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 // someone else's words, not even the owner). Like sending, it needs write access to the
 // channel. Returns the updated message and its channel (for the live event).
 func (s *Service) EditMessage(ctx context.Context, by accounts.User, channelID, messageID int64, content string) (Message, Channel, error) {
-	content, err := cleanMessage(content)
-	if err != nil {
-		return Message{}, Channel{}, err
-	}
 	c, err := s.Channel(ctx, by, channelID)
 	if err != nil {
 		return Message{}, Channel{}, err
@@ -323,13 +388,33 @@ func (s *Service) EditMessage(ctx context.Context, by accounts.User, channelID, 
 	if current.Author == nil || current.Author.ID != by.ID {
 		return Message{}, Channel{}, accounts.ErrForbidden
 	}
-
-	n, err := s.queries.EditMessage(ctx, db.EditMessageParams{ID: messageID, AuthorID: &by.ID, Content: content})
-	if err != nil {
+	// A message with files may end up with no text; one without must keep some.
+	if content, err = cleanContent(content, len(current.Attachments) > 0); err != nil {
 		return Message{}, Channel{}, err
 	}
-	if n == 0 {
-		return Message{}, Channel{}, ErrMessageNotFound // deleted meanwhile
+
+	// Mentions follow the new text (the reply ping stays: the message is still a reply).
+	names, everyone := parseMentions(content)
+	var replyAuthor int64
+	if current.ReplyTo != nil && current.ReplyTo.Author != nil {
+		replyAuthor = current.ReplyTo.Author.ID
+	}
+	err = s.withTx(ctx, func(q *db.Queries) error {
+		n, err := q.EditMessage(ctx, db.EditMessageParams{ID: messageID, AuthorID: &by.ID, Content: content,
+			MentionsEveryone: canMentionEveryone(by, everyone)})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrMessageNotFound // deleted meanwhile
+		}
+		if err := q.DeleteMentions(ctx, messageID); err != nil {
+			return err
+		}
+		return saveMentions(ctx, q, messageID, by, c, names, replyAuthor)
+	})
+	if err != nil {
+		return Message{}, Channel{}, err
 	}
 	m, err := s.getMessage(ctx, channelID, messageID)
 	return m, c, err
@@ -346,14 +431,18 @@ func (s *Service) getMessage(ctx context.Context, channelID, messageID int64) (M
 	}
 	// GetMessageRow and ListMessagesRow have exactly the same fields (the queries select
 	// the same columns), so Go allows converting one struct type into the other.
-	return toMessage(db.ListMessagesRow(row)), nil
+	msgs := []Message{toMessage(db.ListMessagesRow(row))}
+	if err := s.decorate(ctx, msgs); err != nil {
+		return Message{}, err
+	}
+	return msgs[0], nil
 }
 
 // toMessage turns a database row into a Message, including the reply quote.
 func toMessage(r db.ListMessagesRow) Message {
 	m := Message{
 		ID: r.ID, ChannelID: r.ChannelID, Content: r.Content, CreatedAt: r.CreatedAt,
-		Deleted: r.Deleted, EditedAt: r.EditedAt,
+		Deleted: r.Deleted, EditedAt: r.EditedAt, MentionsEveryone: r.MentionsEveryone,
 	}
 	if r.AuthorID != nil && r.AuthorUsername != nil && r.AuthorDisplayName != nil {
 		m.Author = &Author{ID: *r.AuthorID, Username: *r.AuthorUsername, DisplayName: *r.AuthorDisplayName}
@@ -402,6 +491,9 @@ func (s *Service) ListMessages(ctx context.Context, viewer accounts.User, channe
 	msgs = make([]Message, len(rows))
 	for i, r := range rows {
 		msgs[len(rows)-1-i] = toMessage(r)
+	}
+	if err := s.decorate(ctx, msgs); err != nil {
+		return nil, false, err
 	}
 	return msgs, hasMore, nil
 }
@@ -472,6 +564,26 @@ func cleanChannelFields(name, topic string) (string, string, error) {
 }
 
 // cleanMessage validates message text. Line breaks are allowed; Windows line endings become "\n".
+// cleanContent: like cleanMessage, but a message with files may have no text at all.
+func cleanContent(content string, hasFiles bool) (string, error) {
+	if hasFiles && strings.TrimSpace(content) == "" {
+		return "", nil
+	}
+	return cleanMessage(content)
+}
+
+func unique(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	out := ids[:0:0]
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func cleanMessage(content string) (string, error) {
 	content = strings.ReplaceAll(content, "\r\n", "\n")
 	if strings.TrimSpace(content) == "" {
@@ -539,12 +651,20 @@ func (s *Service) DeleteMessage(ctx context.Context, by accounts.User, channelID
 		return Channel{}, accounts.ErrForbidden
 	}
 
-	n, err := s.queries.DeleteMessage(ctx, db.DeleteMessageParams{ID: messageID, DeletedBy: &by.ID})
+	// The text is erased and the files go with it (their rows now; the files on disk at
+	// the next cleanup, see files.Service.Cleanup). Downloads stop working at once.
+	err = s.withTx(ctx, func(q *db.Queries) error {
+		n, err := q.DeleteMessage(ctx, db.DeleteMessageParams{ID: messageID, DeletedBy: &by.ID})
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return ErrMessageNotFound // deleted by someone else meanwhile
+		}
+		return q.DeleteMessageAttachments(ctx, &messageID)
+	})
 	if err != nil {
 		return Channel{}, err
-	}
-	if n == 0 {
-		return Channel{}, ErrMessageNotFound // deleted by someone else meanwhile
 	}
 	return c, nil
 }

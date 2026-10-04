@@ -10,6 +10,22 @@ import (
 	"time"
 )
 
+const addMentions = `-- name: AddMentions :exec
+INSERT INTO message_mentions (message_id, user_id)
+SELECT $1, unnest($2::bigint[])
+ON CONFLICT DO NOTHING
+`
+
+type AddMentionsParams struct {
+	MessageID int64
+	UserIds   []int64
+}
+
+func (q *Queries) AddMentions(ctx context.Context, arg AddMentionsParams) error {
+	_, err := q.db.Exec(ctx, addMentions, arg.MessageID, arg.UserIds)
+	return err
+}
+
 const createChannel = `-- name: CreateChannel :one
 INSERT INTO channels (name, topic, view_role, send_role, position)
 VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
@@ -46,16 +62,17 @@ func (q *Queries) CreateChannel(ctx context.Context, arg CreateChannelParams) (C
 }
 
 const createMessage = `-- name: CreateMessage :one
-INSERT INTO messages (channel_id, author_id, content, reply_to_id)
-VALUES ($1, $2, $3, $4)
+INSERT INTO messages (channel_id, author_id, content, reply_to_id, mentions_everyone)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id
 `
 
 type CreateMessageParams struct {
-	ChannelID int64
-	AuthorID  *int64
-	Content   string
-	ReplyToID *int64
+	ChannelID        int64
+	AuthorID         *int64
+	Content          string
+	ReplyToID        *int64
+	MentionsEveryone bool
 }
 
 func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (int64, error) {
@@ -64,6 +81,7 @@ func (q *Queries) CreateMessage(ctx context.Context, arg CreateMessageParams) (i
 		arg.AuthorID,
 		arg.Content,
 		arg.ReplyToID,
+		arg.MentionsEveryone,
 	)
 	var id int64
 	err := row.Scan(&id)
@@ -80,6 +98,15 @@ func (q *Queries) DeleteChannel(ctx context.Context, id int64) (int64, error) {
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const deleteMentions = `-- name: DeleteMentions :exec
+DELETE FROM message_mentions WHERE message_id = $1
+`
+
+func (q *Queries) DeleteMentions(ctx context.Context, messageID int64) error {
+	_, err := q.db.Exec(ctx, deleteMentions, messageID)
+	return err
 }
 
 const deleteMessage = `-- name: DeleteMessage :execrows
@@ -102,19 +129,25 @@ func (q *Queries) DeleteMessage(ctx context.Context, arg DeleteMessageParams) (i
 }
 
 const editMessage = `-- name: EditMessage :execrows
-UPDATE messages SET content = $3, edited_at = now()
+UPDATE messages SET content = $3, mentions_everyone = $4, edited_at = now()
 WHERE id = $1 AND author_id = $2 AND deleted_at IS NULL
 `
 
 type EditMessageParams struct {
-	ID       int64
-	AuthorID *int64
-	Content  string
+	ID               int64
+	AuthorID         *int64
+	Content          string
+	MentionsEveryone bool
 }
 
 // Only the author can edit, and only a live message.
 func (q *Queries) EditMessage(ctx context.Context, arg EditMessageParams) (int64, error) {
-	result, err := q.db.Exec(ctx, editMessage, arg.ID, arg.AuthorID, arg.Content)
+	result, err := q.db.Exec(ctx, editMessage,
+		arg.ID,
+		arg.AuthorID,
+		arg.Content,
+		arg.MentionsEveryone,
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -144,7 +177,7 @@ func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
 const getMessage = `-- name: GetMessage :one
 SELECT
     m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
-    (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted, m.mentions_everyone,
     u.username     AS author_username,
     u.display_name AS author_display_name,
     m.reply_to_id,
@@ -173,6 +206,7 @@ type GetMessageRow struct {
 	EditedAt               *time.Time
 	AuthorID               *int64
 	Deleted                bool
+	MentionsEveryone       bool
 	AuthorUsername         *string
 	AuthorDisplayName      *string
 	ReplyToID              *int64
@@ -195,6 +229,7 @@ func (q *Queries) GetMessage(ctx context.Context, arg GetMessageParams) (GetMess
 		&i.EditedAt,
 		&i.AuthorID,
 		&i.Deleted,
+		&i.MentionsEveryone,
 		&i.AuthorUsername,
 		&i.AuthorDisplayName,
 		&i.ReplyToID,
@@ -307,10 +342,51 @@ func (q *Queries) ListChannels(ctx context.Context) ([]ListChannelsRow, error) {
 	return items, nil
 }
 
+const listMentions = `-- name: ListMentions :many
+SELECT mm.message_id, u.id, u.username, u.display_name
+FROM message_mentions mm
+JOIN users u ON u.id = mm.user_id
+WHERE mm.message_id = ANY($1::bigint[])
+ORDER BY mm.message_id, u.id
+`
+
+type ListMentionsRow struct {
+	MessageID   int64
+	ID          int64
+	Username    string
+	DisplayName string
+}
+
+// Who the given messages mention (for message objects).
+func (q *Queries) ListMentions(ctx context.Context, messageIds []int64) ([]ListMentionsRow, error) {
+	rows, err := q.db.Query(ctx, listMentions, messageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListMentionsRow
+	for rows.Next() {
+		var i ListMentionsRow
+		if err := rows.Scan(
+			&i.MessageID,
+			&i.ID,
+			&i.Username,
+			&i.DisplayName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMessages = `-- name: ListMessages :many
 SELECT
     m.id, m.channel_id, m.content, m.created_at, m.edited_at, m.author_id,
-    (m.deleted_at IS NOT NULL)::boolean AS deleted,
+    (m.deleted_at IS NOT NULL)::boolean AS deleted, m.mentions_everyone,
     u.username     AS author_username,
     u.display_name AS author_display_name,
     m.reply_to_id,
@@ -343,6 +419,7 @@ type ListMessagesRow struct {
 	EditedAt               *time.Time
 	AuthorID               *int64
 	Deleted                bool
+	MentionsEveryone       bool
 	AuthorUsername         *string
 	AuthorDisplayName      *string
 	ReplyToID              *int64
@@ -374,6 +451,7 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 			&i.EditedAt,
 			&i.AuthorID,
 			&i.Deleted,
+			&i.MentionsEveryone,
 			&i.AuthorUsername,
 			&i.AuthorDisplayName,
 			&i.ReplyToID,
@@ -393,23 +471,146 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 	return items, nil
 }
 
-const messageExists = `-- name: MessageExists :one
-SELECT EXISTS (
-    SELECT 1 FROM messages WHERE id = $1 AND channel_id = $2 AND deleted_at IS NULL
+const markRead = `-- name: MarkRead :one
+INSERT INTO read_states (user_id, channel_id, last_read_id)
+VALUES (
+    $1, $2,
+    LEAST($3::bigint,
+          (SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel_id = $2))
 )
+ON CONFLICT (user_id, channel_id)
+DO UPDATE SET last_read_id = GREATEST(read_states.last_read_id, EXCLUDED.last_read_id)
+RETURNING last_read_id
 `
 
-type MessageExistsParams struct {
+type MarkReadParams struct {
+	UserID    int64
+	ChannelID int64
+	MessageID int64
+}
+
+// Moves the read marker forward (never back), and never past the newest message.
+func (q *Queries) MarkRead(ctx context.Context, arg MarkReadParams) (int64, error) {
+	row := q.db.QueryRow(ctx, markRead, arg.UserID, arg.ChannelID, arg.MessageID)
+	var last_read_id int64
+	err := row.Scan(&last_read_id)
+	return last_read_id, err
+}
+
+const mentionCandidates = `-- name: MentionCandidates :many
+
+SELECT id, role FROM users
+WHERE username = ANY($1::text[]) OR id = $2
+`
+
+type MentionCandidatesParams struct {
+	Usernames     []string
+	ReplyAuthorID int64
+}
+
+type MentionCandidatesRow struct {
+	ID   int64
+	Role string
+}
+
+// ---- mentions (M6) ----
+// The users named in a message (@username), plus the author of the message it replies to.
+func (q *Queries) MentionCandidates(ctx context.Context, arg MentionCandidatesParams) ([]MentionCandidatesRow, error) {
+	rows, err := q.db.Query(ctx, mentionCandidates, arg.Usernames, arg.ReplyAuthorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []MentionCandidatesRow
+	for rows.Next() {
+		var i MentionCandidatesRow
+		if err := rows.Scan(&i.ID, &i.Role); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const replyTarget = `-- name: ReplyTarget :one
+SELECT author_id FROM messages WHERE id = $1 AND channel_id = $2 AND deleted_at IS NULL
+`
+
+type ReplyTargetParams struct {
 	ID        int64
 	ChannelID int64
 }
 
-// Is there a live (not deleted) message with this id in this channel? (reply targets)
-func (q *Queries) MessageExists(ctx context.Context, arg MessageExistsParams) (bool, error) {
-	row := q.db.QueryRow(ctx, messageExists, arg.ID, arg.ChannelID)
-	var exists bool
-	err := row.Scan(&exists)
-	return exists, err
+// A live (not deleted) message in this channel that a reply may point at, and its author.
+func (q *Queries) ReplyTarget(ctx context.Context, arg ReplyTargetParams) (*int64, error) {
+	row := q.db.QueryRow(ctx, replyTarget, arg.ID, arg.ChannelID)
+	var author_id *int64
+	err := row.Scan(&author_id)
+	return author_id, err
+}
+
+const unreadCounts = `-- name: UnreadCounts :many
+
+SELECT
+    c.id AS channel_id,
+    COALESCE(rs.last_read_id, 0)::bigint AS last_read_id,
+    (SELECT COUNT(*) FROM (
+        SELECT 1 FROM messages m
+        WHERE m.channel_id = c.id AND m.id > COALESCE(rs.last_read_id, 0)
+          AND m.created_at > u.created_at AND m.deleted_at IS NULL
+          AND m.author_id IS DISTINCT FROM u.id
+        LIMIT 100) x)::int AS unread_count,
+    (SELECT COUNT(*) FROM (
+        SELECT 1 FROM messages m
+        WHERE m.channel_id = c.id AND m.id > COALESCE(rs.last_read_id, 0)
+          AND m.created_at > u.created_at AND m.deleted_at IS NULL
+          AND m.author_id IS DISTINCT FROM u.id
+          AND (m.mentions_everyone OR EXISTS (
+              SELECT 1 FROM message_mentions mm WHERE mm.message_id = m.id AND mm.user_id = u.id))
+        LIMIT 100) y)::int AS mention_count
+FROM channels c
+JOIN users u ON u.id = $1
+LEFT JOIN read_states rs ON rs.user_id = u.id AND rs.channel_id = c.id
+`
+
+type UnreadCountsRow struct {
+	ChannelID    int64
+	LastReadID   int64
+	UnreadCount  int32
+	MentionCount int32
+}
+
+// ---- unread (M6) ----
+// Per channel, for one user: the last message they read, how many newer messages there
+// are, and how many of those mention them. Their own messages, deleted messages, and
+// messages from before their account existed never count. Counts stop at 100 (the
+// client shows "99+"), so a huge backlog stays cheap to count.
+func (q *Queries) UnreadCounts(ctx context.Context, userID int64) ([]UnreadCountsRow, error) {
+	rows, err := q.db.Query(ctx, unreadCounts, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []UnreadCountsRow
+	for rows.Next() {
+		var i UnreadCountsRow
+		if err := rows.Scan(
+			&i.ChannelID,
+			&i.LastReadID,
+			&i.UnreadCount,
+			&i.MentionCount,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateChannel = `-- name: UpdateChannel :one

@@ -98,7 +98,11 @@ func (s *Service) Logout(ctx context.Context, sessionID int64) error {
 }
 
 func toUser(u db.User) User {
-	return User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: perm.Role(u.Role)}
+	user := User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: perm.Role(u.Role)}
+	if u.AvatarKey != nil {
+		user.AvatarKey = *u.AvatarKey
+	}
+	return user
 }
 
 // DeleteOldSessions removes expired and logged-out sessions; returns how many.

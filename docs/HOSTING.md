@@ -23,7 +23,7 @@ Time needed: about 30-60 minutes the first time.
    │  docker compose:                                   │
    │    server   HTTPS (Let's Encrypt), API, WebSocket  │
    │    db       PostgreSQL (not reachable from outside)│
-   │    backup   daily database backups → ./backups     │
+   │    backup   daily backups (database + files)       │
    └────────────────────────────────────────────────────┘
 ```
 
@@ -191,6 +191,21 @@ docker compose exec backup sh -c 'pg_restore --dbname="$PGDATABASE" --no-owner /
 docker compose start server
 ```
 Try a restore once while nothing important is at stake, so you know it works.
+
+**Uploaded files and avatars** are files, not database rows: they live in the `serverdata` Docker volume. The same `backup` container archives them at the same time into `deploy/backups/vianden-files-<date>.tar.gz` (it can only read that volume, never change it). Copy and encrypt these archives along with the `.dump` files: they contain everything people shared.
+
+**Restoring files** (after restoring the database from the **same** backup time; a file without its database row is deleted by the hourly cleanup, and a row without its file shows "not found"):
+```bash
+cd vianden-server/deploy
+docker compose stop server
+docker volume ls | grep serverdata        # the volume's full name, e.g. deploy_serverdata
+docker run --rm -v deploy_serverdata:/data -v "$PWD/backups:/backups:ro" postgres:18-alpine \
+  sh -c 'rm -rf /data/uploads /data/avatars && tar -xzf /backups/vianden-files-2026-10-04_120000.tar.gz -C /data'
+docker compose start server
+```
+(The archive keeps each file's owner, so the server can read them again. `postgres:18-alpine` is used only because it is already on the machine.)
+
+**Disk space:** files can be up to 25 MB each. Check now and then with `df -h` and `docker system df -v`; files of deleted messages are removed automatically within an hour.
 
 ### Third-party licenses
 The server image contains the license texts of all included open-source code in `/licenses`. Release archives include them in `third_party_licenses/`. The app shows them under **⋯ → About & licenses**.

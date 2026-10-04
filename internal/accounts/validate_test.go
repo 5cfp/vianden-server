@@ -20,6 +20,7 @@ func TestValidateUsername(t *testing.T) {
 		"os ama",                 // space
 		"osаma",                  // Cyrillic "а" that looks like Latin "a"
 		"osama!", "o@", "../etc", // other symbols
+		"everyone", "here", // reserved for special mentions
 	}
 	for _, u := range invalid {
 		if err := validateUsername(u); err == nil {

@@ -151,3 +151,31 @@ func (e *BannedError) Error() string { return ErrBanned.Error() }
 
 // Is makes errors.Is(err, ErrBanned) true for a *BannedError.
 func (e *BannedError) Is(target error) bool { return target == ErrBanned }
+
+// UpdateDisplayName changes a user's own display name (same rules as when registering).
+func (s *Service) UpdateDisplayName(ctx context.Context, userID int64, name string) (Member, error) {
+	name = strings.TrimSpace(name)
+	if err := validateDisplayName(name); err != nil {
+		return Member{}, err
+	}
+	u, err := s.queries.SetDisplayName(ctx, db.SetDisplayNameParams{ID: userID, DisplayName: name})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Member{}, ErrUserNotFound
+	}
+	if err != nil {
+		return Member{}, err
+	}
+	return toMember(u), nil
+}
+
+// GetMember returns one account (e.g. after its avatar changed).
+func (s *Service) GetMember(ctx context.Context, id int64) (Member, error) {
+	u, err := s.queries.GetUser(ctx, id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Member{}, ErrUserNotFound
+	}
+	if err != nil {
+		return Member{}, err
+	}
+	return toMember(u), nil
+}
