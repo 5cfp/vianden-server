@@ -23,3 +23,14 @@ sql:
               import: time
               type: Time
               pointer: true
+          # Nullable text and bigint (e.g. from LEFT JOIN) become pointers: nil = NULL.
+          - db_type: text
+            nullable: true
+            go_type:
+              type: string
+              pointer: true
+          - db_type: pg_catalog.int8
+            nullable: true
+            go_type:
+              type: int64
+              pointer: true

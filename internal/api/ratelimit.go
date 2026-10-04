@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+
+	"github.com/5cfp/vianden-server/internal/accounts"
 )
 
 // ipRateLimiter limits how often each client IP address may call an endpoint.
@@ -109,4 +111,17 @@ func rateLimitKey(ip string) string {
 		return ip
 	}
 	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// limitUser is like limit, but counts per logged-in user instead of per IP address,
+// so friends behind the same home router do not share one limit.
+func (l *ipRateLimiter) limitUser(next authedHandler) authedHandler {
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
+		if ok, wait := l.allow("user:" + strconv.FormatInt(s.User.ID, 10)); !ok {
+			w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many messages, slow down")
+			return
+		}
+		next(w, r, s)
+	}
 }

@@ -25,7 +25,7 @@ func send(t *testing.T, h http.Handler, method, path, token, body string) *httpt
 }
 
 func handlerWith(acc fakeAccounts) http.Handler {
-	return NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: acc, Logger: discardLogger})
+	return NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: acc, Chat: fakeChat{}, Logger: discardLogger})
 }
 
 func TestLoginSuccess(t *testing.T) {

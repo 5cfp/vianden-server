@@ -40,6 +40,7 @@ type Deps struct {
 	ServerName string
 	DB         Pinger
 	Accounts   Accounts
+	Chat       Chat
 	Logger     *slog.Logger
 }
 
@@ -60,6 +61,16 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("POST /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleCreateInvite(d.Accounts, d.Logger)))
 	mux.HandleFunc("GET /api/v1/invites", requireAuth(d.Accounts, d.Logger, handleListInvites(d.Accounts, d.Logger)))
 	mux.HandleFunc("DELETE /api/v1/invites/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteInvite(d.Accounts, d.Logger)))
+
+	// Channels and messages (any logged-in user; managing channels: owner only, checked in the service).
+	mux.HandleFunc("GET /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleListChannels(d.Chat, d.Logger)))
+	mux.HandleFunc("POST /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleCreateChannel(d.Chat, d.Logger)))
+	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Logger)))
+	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Logger)))
+	mux.HandleFunc("GET /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, handleListMessages(d.Chat, d.Logger)))
+	// Sending: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
+	sendLimit := newIPRateLimiter(60, 10)
+	mux.HandleFunc("POST /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleSendMessage(d.Chat, d.Logger))))
 
 	// Anything that matches no route above gets a JSON 404 in the standard error format.
 	mux.HandleFunc("/", handleNotFound)

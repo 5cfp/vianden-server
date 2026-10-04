@@ -12,16 +12,22 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 
 	"github.com/5cfp/vianden-server/internal/db"
 )
 
+// testLockID is an arbitrary number naming the advisory lock.
+const testLockID = 727_001
+
 // New connects to the test database, applies all migrations, and empties every table.
 // The pool is closed automatically when the test ends.
 //
-// Tests using it must not run in parallel with each other (they share one database).
+// Tests in different packages run in parallel processes but share this one database, so
+// New first takes a PostgreSQL "advisory lock": a named, database-wide lock that only one
+// connection can hold. Other tests wait until it is released when the test ends.
 func New(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 
@@ -36,6 +42,20 @@ func New(t *testing.T) *pgxpool.Pool {
 	}
 
 	ctx := context.Background()
+
+	lockConn, err := pgx.Connect(ctx, url)
+	if err != nil {
+		t.Fatalf("connecting to test database: %v", err)
+	}
+	if _, err := lockConn.Exec(ctx, "SELECT pg_advisory_lock($1)", testLockID); err != nil {
+		t.Fatalf("locking test database: %v", err)
+	}
+	// Cleanups run last-registered-first, so this unlock runs after the pool is closed.
+	t.Cleanup(func() {
+		lockConn.Exec(ctx, "SELECT pg_advisory_unlock($1)", testLockID)
+		lockConn.Close(ctx)
+	})
+
 	if err := db.Migrate(ctx, url, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatalf("migrating test database: %v", err)
 	}
@@ -46,7 +66,7 @@ func New(t *testing.T) *pgxpool.Pool {
 	t.Cleanup(pool.Close)
 
 	// Start every test from empty tables. RESTART IDENTITY resets the id counters to 1.
-	if _, err := pool.Exec(ctx, "TRUNCATE users, sessions, invites RESTART IDENTITY CASCADE"); err != nil {
+	if _, err := pool.Exec(ctx, "TRUNCATE users, sessions, invites, channels, messages RESTART IDENTITY CASCADE"); err != nil {
 		t.Fatalf("emptying test database: %v", err)
 	}
 	return pool

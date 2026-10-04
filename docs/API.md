@@ -74,6 +74,11 @@ Every error response (any 4xx or 5xx status) has this body:
 | `invalid_password` | 400 | Password breaks the [password rules](#account-rules). |
 | `invalid_max_uses` | 400 | Invite `max_uses` is outside 1-100. |
 | `invalid_expires_in_hours` | 400 | Invite `expires_in_hours` is outside 1-720. |
+| `invalid_name` | 400 | Channel name breaks the [channel rules](#channel-and-message-rules). |
+| `invalid_topic` | 400 | Channel topic breaks the [channel rules](#channel-and-message-rules). |
+| `invalid_content` | 400 | Message text breaks the [message rules](#channel-and-message-rules). |
+| `invalid_before` | 400 | The `before` query parameter is not a positive message id. |
+| `invalid_limit` | 400 | The `limit` query parameter is not between 1 and 100. |
 | `invalid_invite` | 403 | Invite code is unknown, expired, or used up. |
 | `invalid_credentials` | 401 | Login failed: wrong username or password (the response never says which). |
 | `unauthorized` | 401 | The session token is missing, malformed, unknown, expired, or revoked. The response also has the header `WWW-Authenticate: Bearer`. |
@@ -81,6 +86,7 @@ Every error response (any 4xx or 5xx status) has this body:
 | `forbidden` | 403 | You are logged in, but not allowed to do this (for example, a member managing invites). |
 | `not_found` | 404 | No route matches the method and path. |
 | `username_taken` | 409 | Another account already has this username (comparison ignores case). |
+| `channel_name_taken` | 409 | Another channel already has this name (comparison ignores case). |
 | `rate_limited` | 429 | Too many attempts. Wait the number of seconds in the `Retry-After` header. |
 | `internal_error` | 500 | Unexpected server error. Details are only in the server log. |
 
@@ -354,6 +360,121 @@ Deletes an invite. Its code stops working immediately (use this if a code leaked
 - **Response `204 No Content`:** no body.
 - **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404).
 
+### Channel and message rules
+| Field | Rules |
+|---|---|
+| Channel `name` | 1-32 characters after trimming spaces; any language and emoji; no control or invisible formatting characters. Unique, ignoring case. |
+| Channel `topic` | 0-120 characters, same character rules as names. |
+| Message `content` | 1-4000 characters; must contain more than whitespace. Line breaks (`\n`) and tabs are allowed; `\r\n` is stored as `\n`. No other control characters. Leading and trailing spaces are kept. |
+
+Every new server has one channel, **General**. In this protocol version every logged-in user can read and write every channel; only the owner can create, rename, or delete channels.
+
+#### Channel object
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Channel ID. |
+| `name` | string | Display name, e.g. `General`. |
+| `topic` | string | Short description; may be empty. |
+| `type` | string | Always `text` in this version (`voice` comes later). Clients should ignore channels of types they do not know. |
+| `position` | integer | Sort order in the room list, lowest first. |
+| `last_message` | object or null | Preview of the newest message: `author_name` (string; empty if the account was deleted), `content` (at most 100 characters, then `…`), `created_at` (RFC 3339, UTC). `null` if the channel has no messages. Only in `GET /channels`; `null` in create/update responses. |
+
+#### Message object
+| Field | Type | Meaning |
+|---|---|---|
+| `id` | integer | Message ID. Newer messages always have higher IDs. |
+| `channel_id` | integer | Channel it belongs to. |
+| `author` | object or null | `id`, `username`, `display_name` of the sender; `null` if the account was deleted. |
+| `content` | string | The text. Display it as plain text, never as markup. |
+| `created_at` | string | Send time, RFC 3339 in UTC. |
+
+### `GET /api/v1/channels`
+Lists all channels in room-list order, each with a preview of its newest message.
+
+- **Auth:** session token
+- **Response `200 OK`:**
+
+```json
+{
+  "channels": [
+    {
+      "id": 1, "name": "General", "topic": "Everything and nothing", "type": "text", "position": 0,
+      "last_message": { "author_name": "Sara", "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z" }
+    },
+    { "id": 2, "name": "Games", "topic": "", "type": "text", "position": 1, "last_message": null }
+  ]
+}
+```
+
+- **Errors:** `unauthorized` (401).
+
+### `POST /api/v1/channels`
+Creates a text channel at the end of the list.
+
+- **Auth:** session token; **owner only**
+- **Request body:** `{ "name": "Games", "topic": "Who is online tonight?" }` (`topic` optional)
+- **Response `201 Created`:** `{ "channel": <channel object> }`
+- **Errors:** `invalid_request` (400), `invalid_name` (400), `invalid_topic` (400), `unauthorized` (401), `forbidden` (403), `channel_name_taken` (409).
+
+### `PATCH /api/v1/channels/{id}`
+Renames a channel and/or changes its topic. Send only the fields to change.
+
+- **Auth:** session token; **owner only**
+- **Request body:** `{ "name": "Gaming" }`, `{ "topic": "New topic" }`, or both.
+- **Response `200 OK`:** `{ "channel": <channel object> }`
+- **Errors:** `invalid_request` (400), `invalid_name` (400), `invalid_topic` (400), `unauthorized` (401), `forbidden` (403), `not_found` (404), `channel_name_taken` (409).
+
+### `DELETE /api/v1/channels/{id}`
+Deletes a channel **and all its messages**. This cannot be undone.
+
+- **Auth:** session token; **owner only**
+- **Response `204 No Content`:** no body.
+- **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404).
+
+### `GET /api/v1/channels/{id}/messages`
+Returns one page of a channel's history, **oldest first** within the page.
+
+- **Auth:** session token
+- **Query parameters:**
+
+| Parameter | Required | Meaning |
+|---|---|---|
+| `before` | no | Return only messages with an ID lower than this (older). Omit to get the newest page. |
+| `limit` | no | Page size, 1-100. Default 50. |
+
+- **Response `200 OK`:**
+
+```json
+{
+  "messages": [
+    { "id": 41, "channel_id": 1, "author": { "id": 2, "username": "sara", "display_name": "Sara" },
+      "content": "Anyone up for a round tonight?", "created_at": "2026-10-04T18:41:00Z" },
+    { "id": 42, "channel_id": 1, "author": { "id": 1, "username": "osama", "display_name": "Osama" },
+      "content": "In 20 minutes.", "created_at": "2026-10-04T18:43:00Z" }
+  ],
+  "has_more": true
+}
+```
+
+- `has_more` is `true` when older messages exist.
+- **Loading older messages** ("infinite scroll up"): call again with `before` = the `id` of the oldest message you have (the first one in the list). Repeat until `has_more` is `false`. This is keyset pagination: pages never shift or repeat when new messages arrive meanwhile.
+- **Errors:** `invalid_before` (400), `invalid_limit` (400), `unauthorized` (401), `not_found` (404).
+
+Example:
+```
+curl "http://127.0.0.1:8080/api/v1/channels/1/messages?limit=50" -H "Authorization: Bearer vs_..."
+```
+
+### `POST /api/v1/channels/{id}/messages`
+Sends a message as the logged-in user.
+
+- **Auth:** session token
+- **Request body:** `{ "content": "Hello!" }`
+- **Response `201 Created`:** `{ "message": <message object> }`
+- **Errors:** `invalid_request` (400), `invalid_content` (400), `unauthorized` (401), `not_found` (404), `rate_limited` (429).
+- **Rate limited** per user (see [Rate limits](#rate-limits)).
+- Messages are not pushed to other users yet (real-time arrives in M3); clients reload the history to see new messages.
+
 ---
 
 ## 5. WebSocket
@@ -379,6 +500,7 @@ Deletes an invite. Its code stops working immediately (use this if a code leaked
 | Endpoints | Limit |
 |---|---|
 | `POST /register` and `POST /login` (shared) | 10 requests at once, then 1 more every 6 seconds, per client IP address (IPv6: per /64 network) |
+| `POST /channels/{id}/messages` | 10 messages at once, then 1 more per second, **per user** |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
 
@@ -393,4 +515,5 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added `POST /api/v1/register`, session tokens, owner setup, invites, and account rules.
 - Added `POST /api/v1/login`, `POST /api/v1/logout`, `GET /api/v1/me`, bearer token authentication, and rate limits on register and login.
 - Added `POST /api/v1/invites`, `GET /api/v1/invites`, `DELETE /api/v1/invites/{id}` (owner only).
+- Added channels (`GET`, `POST /api/v1/channels`, `PATCH`, `DELETE /api/v1/channels/{id}`) and messages (`GET`, `POST /api/v1/channels/{id}/messages`) with keyset pagination.
 - All responses now send `Cache-Control: no-store`; request bodies are limited to 64 KiB and parsed strictly.

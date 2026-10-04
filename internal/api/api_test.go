@@ -40,7 +40,7 @@ func decode[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 }
 
 func TestHealth(t *testing.T) {
-	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Logger: discardLogger}), "GET", "/api/v1/health")
+	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Chat: fakeChat{}, Logger: discardLogger}), "GET", "/api/v1/health")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -52,7 +52,7 @@ func TestHealth(t *testing.T) {
 
 func TestHealthDatabaseDown(t *testing.T) {
 	down := fakeDB{err: errors.New("connection refused to 10.0.0.5")}
-	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: down, Accounts: fakeAccounts{}, Logger: discardLogger}), "GET", "/api/v1/health")
+	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: down, Accounts: fakeAccounts{}, Chat: fakeChat{}, Logger: discardLogger}), "GET", "/api/v1/health")
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503", rec.Code)
@@ -63,7 +63,7 @@ func TestHealthDatabaseDown(t *testing.T) {
 }
 
 func TestInfo(t *testing.T) {
-	rec := do(t, NewHandler(Deps{ServerName: "My Server", DB: healthyDB, Accounts: fakeAccounts{}, Logger: discardLogger}), "GET", "/api/v1/info")
+	rec := do(t, NewHandler(Deps{ServerName: "My Server", DB: healthyDB, Accounts: fakeAccounts{}, Chat: fakeChat{}, Logger: discardLogger}), "GET", "/api/v1/info")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
@@ -76,7 +76,7 @@ func TestInfo(t *testing.T) {
 }
 
 func TestUnknownRouteReturnsJSON404(t *testing.T) {
-	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Logger: discardLogger}), "GET", "/api/v1/does-not-exist")
+	rec := do(t, NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Chat: fakeChat{}, Logger: discardLogger}), "GET", "/api/v1/does-not-exist")
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)

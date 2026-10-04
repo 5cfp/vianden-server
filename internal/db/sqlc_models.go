@@ -8,6 +8,15 @@ import (
 	"time"
 )
 
+type Channel struct {
+	ID        int64
+	Name      string
+	Topic     string
+	Type      string
+	Position  int32
+	CreatedAt time.Time
+}
+
 type Invite struct {
 	ID        int64
 	CodeHash  []byte
@@ -15,6 +24,14 @@ type Invite struct {
 	MaxUses   int32
 	Uses      int32
 	ExpiresAt time.Time
+	CreatedAt time.Time
+}
+
+type Message struct {
+	ID        int64
+	ChannelID int64
+	AuthorID  *int64
+	Content   string
 	CreatedAt time.Time
 }
 

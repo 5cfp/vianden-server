@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/chat"
 )
 
 type createInviteRequest struct {
@@ -51,7 +52,7 @@ func handleCreateInvite(svc Accounts, logger *slog.Logger) authedHandler {
 
 		inv, code, err := svc.CreateInvite(r.Context(), s.User, req.MaxUses, req.ExpiresInHours)
 		if err != nil {
-			writeAccountsError(w, logger, "create invite", err)
+			writeServiceError(w, logger, "create invite", err)
 			return
 		}
 		logger.Info("invite created", "invite_id", inv.ID, "by_user_id", s.User.ID, "max_uses", inv.MaxUses)
@@ -63,7 +64,7 @@ func handleListInvites(svc Accounts, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		invites, err := svc.ListInvites(r.Context(), s.User)
 		if err != nil {
-			writeAccountsError(w, logger, "list invites", err)
+			writeServiceError(w, logger, "list invites", err)
 			return
 		}
 		resp := listInvitesResponse{Invites: make([]inviteResponse, len(invites))} // [] not null when empty
@@ -82,7 +83,7 @@ func handleDeleteInvite(svc Accounts, logger *slog.Logger) authedHandler {
 			return
 		}
 		if err := svc.DeleteInvite(r.Context(), s.User, id); err != nil {
-			writeAccountsError(w, logger, "delete invite", err)
+			writeServiceError(w, logger, "delete invite", err)
 			return
 		}
 		logger.Info("invite deleted", "invite_id", id, "by_user_id", s.User.ID)
@@ -91,8 +92,8 @@ func handleDeleteInvite(svc Accounts, logger *slog.Logger) authedHandler {
 	}
 }
 
-// writeAccountsError maps errors from the accounts service to API errors.
-func writeAccountsError(w http.ResponseWriter, logger *slog.Logger, action string, err error) {
+// writeServiceError maps errors from the accounts and chat services to API errors.
+func writeServiceError(w http.ResponseWriter, logger *slog.Logger, action string, err error) {
 	var invalid *accounts.ValidationError
 	switch {
 	case errors.As(err, &invalid):
@@ -101,6 +102,10 @@ func writeAccountsError(w http.ResponseWriter, logger *slog.Logger, action strin
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	case errors.Is(err, accounts.ErrInviteNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, chat.ErrChannelNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, chat.ErrChannelNameTaken):
+		writeError(w, http.StatusConflict, "channel_name_taken", err.Error())
 	default:
 		logger.Error(action+" failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "internal server error")

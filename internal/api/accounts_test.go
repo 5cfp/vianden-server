@@ -82,7 +82,7 @@ func (f fakeAccounts) Register(_ context.Context, in accounts.RegisterInput) (ac
 
 func postRegister(t *testing.T, acc Accounts, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	h := NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: acc, Logger: discardLogger})
+	h := NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: acc, Chat: fakeChat{}, Logger: discardLogger})
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/api/v1/register", strings.NewReader(body))
 	h.ServeHTTP(rec, req)
@@ -168,7 +168,7 @@ func TestRegisterRejectsBadBodies(t *testing.T) {
 }
 
 func TestRegisterOnlyAcceptsPost(t *testing.T) {
-	h := NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Logger: discardLogger})
+	h := NewHandler(Deps{ServerName: "Test", DB: healthyDB, Accounts: fakeAccounts{}, Chat: fakeChat{}, Logger: discardLogger})
 	rec := do(t, h, "GET", "/api/v1/register")
 	if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
 		t.Errorf("GET /register returned %d", rec.Code)

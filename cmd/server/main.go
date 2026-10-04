@@ -15,6 +15,7 @@ import (
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/api"
 	"github.com/5cfp/vianden-server/internal/buildinfo"
+	"github.com/5cfp/vianden-server/internal/chat"
 	"github.com/5cfp/vianden-server/internal/config"
 	"github.com/5cfp/vianden-server/internal/db"
 	"github.com/5cfp/vianden-server/internal/supervisor"
@@ -74,6 +75,7 @@ func run(logger *slog.Logger) error {
 		ServerName: cfg.ServerName,
 		DB:         pool,
 		Accounts:   accountService,
+		Chat:       chat.NewService(pool),
 		Logger:     logger,
 	})
 	supervisor.Run(ctx, logger, "http", func(ctx context.Context) error {
