@@ -79,6 +79,7 @@ No output from `check` means everything is allowed.
 | `internal/auth/` | Password hashing (Argon2id) and secret tokens (sessions, invites) |
 | `internal/chat/` | Text channels and messages (validation, permissions, history pagination) |
 | `internal/realtime/` | WebSocket hub: pushes live events (messages, presence, typing) to connected clients |
+| `internal/web/` | HTTP(S) listeners: plain, Let's Encrypt (autocert), self-signed |
 | `internal/config/` | Loads settings from environment variables / `.env` |
 | `internal/db/` | PostgreSQL connection + migration runner |
 | `internal/db/migrations/` | Database migrations (`.sql`, applied automatically on startup) |
@@ -87,6 +88,25 @@ No output from `check` means everything is allowed.
 | `internal/testdb/` | Test helper: a clean, migrated test database |
 | `internal/buildinfo/` | Server and protocol version numbers |
 | `docs/API.md` | Full API documentation for client developers |
+
+## Hosting (production)
+Run your own server for friends: **[docs/HOSTING.md](docs/HOSTING.md)**: home server (domain, dynamic DNS, port forwarding) or VPS, with Docker Compose (`deploy/`), automatic HTTPS (Let's Encrypt), daily backups, updating, and the encryption model.
+
+Short version (Ubuntu with Docker, domain pointing to the server, ports 80 + 443 forwarded):
+```bash
+git clone https://github.com/5cfp/vianden-server.git
+cd vianden-server/deploy
+cp .env.example .env   # set VIANDEN_DOMAIN and DB_PASSWORD (openssl rand -hex 32)
+docker compose up -d --build
+docker compose logs server | grep vo_   # one-time owner setup token
+```
+
+| Path | What it is |
+|---|---|
+| `Dockerfile` | Minimal image (program + license notices only, non-root) |
+| `deploy/docker-compose.yml` | Server + PostgreSQL + daily backups |
+| `deploy/vianden-server.service` | systemd unit, for running without Docker |
+| `scripts/build-release.sh` | Release archives for Linux (amd64, arm64) and Windows |
 
 ## Documentation
 - API for client developers: [docs/API.md](docs/API.md)

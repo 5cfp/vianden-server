@@ -1,0 +1,10 @@
+# Never send these into the image build (secrets, local data, build output).
+.git
+.env
+*.env
+!.env.example
+data/
+dist/
+bin/
+deploy/backups/
+deploy/.env

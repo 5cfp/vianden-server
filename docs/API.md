@@ -28,10 +28,24 @@ The user gives the client a server address (domain or IP, optionally with a port
 ```
 
 ### Transport and TLS
-> Not finished yet: HTTPS modes arrive in milestone M4.
+A server runs in one of three modes (chosen by its host):
 
-During development the server speaks plain HTTP (default `http://127.0.0.1:8080`).
-Planned modes: `autocert` (Let's Encrypt), `self-signed` (clients use trust-on-first-use of the certificate fingerprint), and `plain` (local development or behind a reverse proxy).
+| Mode | Address users type | What a client must do |
+|---|---|---|
+| `autocert` | `chat.example.com` | Nothing special: a normal, publicly trusted certificate (Let's Encrypt). Plain `http://` requests are redirected to `https://` with `308`. |
+| `self-signed` | `203.0.113.7:443` or a name | The certificate is not signed by a known authority. Use **trust on first use** (below). |
+| `plain` | `http://127.0.0.1:8080` | No encryption. Only for local development, or behind a reverse proxy that provides HTTPS. |
+
+- Only TLS 1.2 and newer are accepted.
+- A client should default to `https://` when the user types an address without a scheme.
+
+#### Trust on first use (self-signed servers)
+1. Connect normally. Certificate verification fails.
+2. Compute the certificate's **fingerprint**: SHA-256 of the certificate's DER bytes, written as 32 uppercase hex pairs joined by colons, e.g. `A7:E3:45:...:FD:C8`. The server prints the same value in its log at every start, so the owner can share it.
+3. Show it to the user and ask them to compare it with the one the owner gave them. Only if they confirm, remember ("pin") it for this `host:port` and connect again, accepting exactly that certificate.
+4. On later connections, accept the certificate only if its fingerprint equals the pin. If it differs, **refuse**, warn the user that the connection may be intercepted, and do not send the session token.
+
+Pins apply to both the REST API and the WebSocket.
 
 ### Content type
 - Requests with a body send JSON (`Content-Type: application/json`).

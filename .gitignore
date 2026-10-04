@@ -17,3 +17,12 @@ coverage.*
 .idea/
 .DS_Store
 Thumbs.db
+
+# Server data (certificates, private keys)
+/data/
+
+# Production (deploy/)
+deploy/.env
+deploy/backups/
+# Release builds
+/dist/

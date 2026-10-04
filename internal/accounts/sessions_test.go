@@ -178,3 +178,26 @@ func registerAndLogin(t *testing.T, svc *Service, setupToken string) AuthResult 
 	}
 	return res
 }
+
+func TestDeleteOldSessions(t *testing.T) {
+	svc, setupToken, pool := newService(t)
+	registerOwner(t, svc, setupToken) // session 1: active
+	loggedOut, _ := svc.Login(ctx, "osama", "owner-password")
+	expired, _ := svc.Login(ctx, "osama", "owner-password")
+	active, _ := svc.Login(ctx, "osama", "owner-password")
+
+	s, _ := svc.Authenticate(ctx, loggedOut.SessionToken)
+	svc.Logout(ctx, s.ID)
+	pool.Exec(ctx, "UPDATE sessions SET expires_at = now() - interval '1 minute' WHERE token_hash = $1", auth.HashToken(expired.SessionToken))
+
+	n, err := svc.DeleteOldSessions(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("deleted %d, err %v; want 2 (the logged-out and the expired one)", n, err)
+	}
+	if _, err := svc.Authenticate(ctx, active.SessionToken); err != nil {
+		t.Errorf("an active session was deleted: %v", err)
+	}
+	if left := count(t, pool, "SELECT count(*) FROM sessions"); left != 2 {
+		t.Errorf("sessions left = %d, want 2 active ones", left)
+	}
+}

@@ -58,6 +58,19 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const deleteOldSessions = `-- name: DeleteOldSessions :execrows
+DELETE FROM sessions WHERE expires_at < now() OR revoked_at IS NOT NULL
+`
+
+// Removes sessions that can never be used again: expired, or logged out.
+func (q *Queries) DeleteOldSessions(ctx context.Context) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteOldSessions)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getActiveSession = `-- name: GetActiveSession :one
 SELECT sessions.id, sessions.user_id, sessions.token_hash, sessions.created_at, sessions.last_used_at, sessions.expires_at, sessions.revoked_at, users.id, users.username, users.display_name, users.password_hash, users.is_owner, users.created_at
 FROM sessions

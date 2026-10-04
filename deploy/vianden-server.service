@@ -1,0 +1,42 @@
+# systemd service for running vianden-server WITHOUT Docker (Linux).
+# Docker users do not need this file. Setup steps: docs/HOSTING.md, "Without Docker".
+#
+#   sudo cp vianden-server.service /etc/systemd/system/
+#   sudo systemctl enable --now vianden-server
+
+[Unit]
+Description=Vianden chat server
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vianden
+Group=vianden
+ExecStart=/usr/local/bin/vianden-server
+# Settings (same variables as .env.example). Readable by root only: it contains the DB password.
+EnvironmentFile=/etc/vianden/server.env
+Environment=VIANDEN_DATA_DIR=/var/lib/vianden
+# Creates /var/lib/vianden, owned by the service user.
+StateDirectory=vianden
+Restart=on-failure
+RestartSec=5
+
+# Allows listening on ports 80 and 443 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Hardening: read-only system, no access to home folders, private /tmp, no privilege gain.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

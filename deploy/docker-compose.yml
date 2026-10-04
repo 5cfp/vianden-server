@@ -1,0 +1,78 @@
+# Production setup for hosts: the server, PostgreSQL, and daily backups.
+#
+#   cd deploy
+#   cp .env.example .env      # then edit .env
+#   docker compose up -d --build
+#
+# Full guide: docs/HOSTING.md
+
+name: vianden
+
+services:
+  db:
+    image: postgres:18-alpine # PostgreSQL License
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DB_USER:-vianden}
+      POSTGRES_DB: ${DB_NAME:-vianden}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in deploy/.env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+    # No "ports:" on purpose: the database is reachable ONLY by the other containers
+    # here, never from the internet or your home network.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  server:
+    build:
+      context: ..
+      args:
+        VERSION: ${VIANDEN_VERSION:-dev}
+    image: vianden-server:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      VIANDEN_SERVER_NAME: ${VIANDEN_SERVER_NAME:-Vianden Server}
+      VIANDEN_TLS_MODE: ${VIANDEN_TLS_MODE:-autocert}
+      VIANDEN_DOMAIN: ${VIANDEN_DOMAIN:-}
+      VIANDEN_ACME_EMAIL: ${VIANDEN_ACME_EMAIL:-}
+      # The database runs on the private Docker network of this machine, so the
+      # connection never leaves the host (that is why TLS to it is not needed).
+      VIANDEN_DATABASE_URL: postgres://${DB_USER:-vianden}:${DB_PASSWORD}@db:5432/${DB_NAME:-vianden}?sslmode=disable
+    ports:
+      - "443:8443" # HTTPS: the app and its WebSocket
+      - "80:8080" # HTTP: Let's Encrypt domain check + redirect to HTTPS
+    volumes:
+      - serverdata:/data # certificates
+    # Hardening: the container cannot write anywhere except /data, has no Linux
+    # capabilities, and its processes can never gain more privileges.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  backup:
+    image: postgres:18-alpine # used only for its pg_dump tool
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGHOST: db
+      PGUSER: ${DB_USER:-vianden}
+      PGDATABASE: ${DB_NAME:-vianden}
+      PGPASSWORD: ${DB_PASSWORD}
+      BACKUP_INTERVAL_HOURS: ${BACKUP_INTERVAL_HOURS:-24}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+    volumes:
+      - ./backups:/backups
+      - ./backup.sh:/backup.sh:ro
+    entrypoint: ["/bin/sh", "/backup.sh"]
+
+volumes:
+  pgdata:
+  serverdata:

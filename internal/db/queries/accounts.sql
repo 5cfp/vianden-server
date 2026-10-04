@@ -39,3 +39,7 @@ UPDATE sessions SET last_used_at = now(), expires_at = $2 WHERE id = $1;
 
 -- name: RevokeSession :exec
 UPDATE sessions SET revoked_at = now() WHERE id = $1 AND revoked_at IS NULL;
+
+-- name: DeleteOldSessions :execrows
+-- Removes sessions that can never be used again: expired, or logged out.
+DELETE FROM sessions WHERE expires_at < now() OR revoked_at IS NOT NULL;

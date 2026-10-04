@@ -94,3 +94,9 @@ func (s *Service) Logout(ctx context.Context, sessionID int64) error {
 func toUser(u db.User) User {
 	return User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, IsOwner: u.IsOwner}
 }
+
+// DeleteOldSessions removes expired and logged-out sessions; returns how many.
+// They are useless (Authenticate already rejects them), so this only keeps the table small.
+func (s *Service) DeleteOldSessions(ctx context.Context) (int64, error) {
+	return s.queries.DeleteOldSessions(ctx)
+}
