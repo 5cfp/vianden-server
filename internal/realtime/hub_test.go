@@ -15,6 +15,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // testServer runs the hub behind a tiny HTTP server. The "token" is just "<userID>-<sessionID>".
@@ -26,7 +27,11 @@ func testServer(t *testing.T) (*Hub, string) {
 		uid, _ := strconv.ParseInt(parts[0], 10, 64)
 		sid, _ := strconv.ParseInt(parts[1], 10, 64)
 		name := "user" + parts[0]
-		hub.Serve(w, r, accounts.Session{ID: sid, User: accounts.User{ID: uid, Username: name, DisplayName: strings.ToUpper(name)}})
+		role := perm.Member // token "<user>-<session>-<role>" sets a role
+		if len(parts) > 2 {
+			role = perm.Role(parts[2])
+		}
+		hub.Serve(w, r, accounts.Session{ID: sid, User: accounts.User{ID: uid, Username: name, DisplayName: strings.ToUpper(name), Role: role}})
 	}))
 	t.Cleanup(srv.Close)
 	return hub, "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -354,4 +359,105 @@ func TestClientMessageFloodIsDisconnected(t *testing.T) {
 	if code := a.closeStatus(); code != websocket.StatusPolicyViolation {
 		t.Errorf("close code = %d, want %d (policy violation)", code, websocket.StatusPolicyViolation)
 	}
+}
+
+func TestEndUserClosesAllTheirConnections(t *testing.T) {
+	hub, url := testServer(t)
+	desktop, _ := dial(t, url, 7, 1)
+	laptop, _ := dial(t, url, 7, 2)
+	other, _ := dial(t, url, 8, 3)
+
+	hub.EndUser(7)
+
+	for name, c := range map[string]*conn{"desktop": desktop, "laptop": laptop} {
+		if code := c.closeStatus(); code != CloseSessionEnded {
+			t.Errorf("%s: close code %d, want %d", name, code, CloseSessionEnded)
+		}
+	}
+	hub.Broadcast("still.here", nil)
+	for e := other.next(); e.Type != "still.here"; e = other.next() {
+		// skip presence events from the closed connections
+	}
+}
+
+// dialAs connects with a role ("<uid>-<sid>-<role>" token).
+func dialAs(t *testing.T, url string, uid, sid int, role perm.Role) *conn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, _, err := websocket.Dial(ctx, url, &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + strconv.Itoa(uid) + "-" + strconv.Itoa(sid) + "-" + string(role)}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.CloseNow() })
+	cn := &conn{t: t, c: c, events: make(chan Event, 100), closed: make(chan websocket.StatusCode, 1)}
+	go func() {
+		for {
+			_, data, err := c.Read(context.Background())
+			if err != nil {
+				cn.closed <- websocket.CloseStatus(err)
+				return
+			}
+			var e Event
+			json.Unmarshal(data, &e)
+			if e.Type != "ready" && e.Type != "presence.updated" {
+				cn.events <- e
+			}
+		}
+	}()
+	time.Sleep(100 * time.Millisecond) // let it register
+	return cn
+}
+
+func TestBroadcastWhereFiltersByRole(t *testing.T) {
+	hub, url := testServer(t)
+	mod := dialAs(t, url, 1, 1, perm.Moderator)
+	member := dialAs(t, url, 2, 2, perm.Member)
+
+	hub.BroadcastWhere("message.created", "staff only", func(r perm.Role) bool { return r.AtLeast(perm.Moderator) })
+
+	if e := mod.next(); e.Type != "message.created" {
+		t.Errorf("moderator got %+v", e)
+	}
+	member.nothing()
+
+	// A role change applies to the open connection at once.
+	hub.UpdateUserRole(2, perm.Moderator)
+	hub.BroadcastWhere("message.created", "staff only", func(r perm.Role) bool { return r.AtLeast(perm.Moderator) })
+	if e := member.next(); e.Type != "message.created" {
+		t.Errorf("promoted member got %+v", e)
+	}
+}
+
+func TestTypingRespectsChannelAccess(t *testing.T) {
+	hub, url := testServer(t)
+	// Channel 5: moderators can see and write. Channel 6: everyone sees, only admins write.
+	hub.SetChannelAccess(func(_ context.Context, id int64) (perm.Role, perm.Role, bool) {
+		switch id {
+		case 5:
+			return perm.Moderator, perm.Moderator, true
+		case 6:
+			return perm.Member, perm.Admin, true
+		}
+		return "", "", false
+	})
+	mod := dialAs(t, url, 1, 1, perm.Moderator)
+	member := dialAs(t, url, 2, 2, perm.Member)
+	other := dialAs(t, url, 3, 3, perm.Moderator)
+
+	mod.send(`{"type":"typing","data":{"channel_id":5}}`)
+	if e := other.next(); e.Type != "typing.started" {
+		t.Errorf("moderator should see typing in the staff channel, got %+v", e)
+	}
+	member.nothing() // never learns anything about the private channel
+
+	member.send(`{"type":"typing","data":{"channel_id":5}}`) // cannot see it
+	time.Sleep(1100 * time.Millisecond)
+	member.send(`{"type":"typing","data":{"channel_id":6}}`) // can see, cannot write
+	time.Sleep(1100 * time.Millisecond)
+	member.send(`{"type":"typing","data":{"channel_id":99}}`) // does not exist
+	other.nothing()
+	mod.nothing()
 }

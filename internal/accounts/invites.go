@@ -7,6 +7,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/auth"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // Invite limits (also documented in docs/API.md).
@@ -35,10 +36,10 @@ type Invite struct {
 	CreatedAt time.Time
 }
 
-// canManageInvites is the permission check. In M1 only the owner may; roles arrive in M5.
+// canManageInvites is the permission check (owner and admins, see the perm package).
 // It is checked here, in the service, so no API endpoint can forget it.
 func canManageInvites(u User) bool {
-	return u.IsOwner
+	return u.Role.Has(perm.ManageInvites)
 }
 
 // CreateInvite creates an invite code. maxUses 0 means the default (1); expiresInHours 0 means 7 days.

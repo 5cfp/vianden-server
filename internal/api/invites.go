@@ -102,8 +102,14 @@ func writeServiceError(w http.ResponseWriter, logger *slog.Logger, action string
 		writeError(w, http.StatusForbidden, "forbidden", err.Error())
 	case errors.Is(err, accounts.ErrInviteNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, accounts.ErrUserNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, chat.ErrChannelNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, chat.ErrMessageNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, chat.ErrReadOnly):
+		writeError(w, http.StatusForbidden, "read_only", err.Error())
 	case errors.Is(err, chat.ErrChannelNameTaken):
 		writeError(w, http.StatusConflict, "channel_name_taken", err.Error())
 	default:

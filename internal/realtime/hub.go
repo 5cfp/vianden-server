@@ -22,6 +22,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // Limits and timings (also documented in docs/API.md).
@@ -71,6 +72,8 @@ type Hub struct {
 	clients map[*client]struct{}
 	online  map[int64]*onlineUser // user id -> info and number of open connections
 	closed  bool                  // true after CloseAll: no new connections
+
+	channelAccess ChannelAccessFunc // nil = no channel checks (tests)
 }
 
 type onlineUser struct {
@@ -209,18 +212,6 @@ func (h *Hub) broadcastLocked(e Event, skip *client) {
 	}
 }
 
-// broadcastExceptUser sends to everyone except all connections of one user (e.g. their own typing).
-func (h *Hub) broadcastExceptUser(e Event, userID int64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	msg := mustJSON(e)
-	for c := range h.clients {
-		if c.user.ID != userID {
-			h.enqueue(c, msg)
-		}
-	}
-}
-
 // enqueue puts a message in a client's queue without ever waiting. Caller holds h.mu.
 func (h *Hub) enqueue(c *client, msg []byte) {
 	select {
@@ -340,7 +331,30 @@ func (h *Hub) handleTyping(c *client, channelID int64) {
 	}
 	c.lastTyping[channelID] = now
 	c.lastTypingAny = now
-	h.broadcastExceptUser(Event{"typing.started", map[string]any{"channel_id": channelID, "user": userInfo(c.user)}}, c.user.ID)
+
+	h.mu.Lock()
+	access, sender := h.channelAccess, c.user // read under the lock: the role can change
+	h.mu.Unlock()
+
+	visibleTo := func(perm.Role) bool { return true }
+	if access != nil {
+		view, send, ok := access(context.Background(), channelID)
+		// Typing is only meaningful where the sender may write, and only shown to people
+		// who may see the channel. Unknown channels are ignored.
+		if !ok || !sender.Role.AtLeast(view) || !sender.Role.AtLeast(send) {
+			return
+		}
+		visibleTo = func(r perm.Role) bool { return r.AtLeast(view) }
+	}
+
+	ev := mustJSON(Event{"typing.started", map[string]any{"channel_id": channelID, "user": userInfo(sender)}})
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for other := range h.clients {
+		if other.user.ID != sender.ID && visibleTo(other.user.Role) {
+			h.enqueue(other, ev)
+		}
+	}
 }
 
 // recoverPanic stops a panic in one connection from crashing the server; the connection is closed.
@@ -357,4 +371,53 @@ func mustJSON(e Event) []byte {
 		panic(err) // only our own event structs are encoded: this is a programming error
 	}
 	return b
+}
+
+// EndUser closes every connection of a user (kick, ban). The client receives 4001 and
+// shows the login screen.
+func (h *Hub) EndUser(userID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.user.ID == userID {
+			h.closeLocked(c, CloseSessionEnded, "signed out by a moderator")
+		}
+	}
+}
+
+// UpdateUserRole updates the role of a user's open connections, so what they may see
+// (private channels, M5) changes at once, without reconnecting.
+func (h *Hub) UpdateUserRole(userID int64, role perm.Role) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.user.ID == userID {
+			c.user.Role = role
+		}
+	}
+}
+
+// BroadcastWhere sends an event only to connections whose user's role passes `to`.
+// Used for private channels: a message in a moderators-only room never reaches members.
+func (h *Hub) BroadcastWhere(eventType string, data any, to func(perm.Role) bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	msg := mustJSON(Event{eventType, data})
+	for c := range h.clients {
+		if to(c.user.Role) {
+			h.enqueue(c, msg)
+		}
+	}
+}
+
+// ChannelAccessFunc returns a channel's minimum roles to see and to write (ok=false if it
+// does not exist). The server passes chat.Service.ChannelAccess.
+type ChannelAccessFunc func(ctx context.Context, channelID int64) (view, send perm.Role, ok bool)
+
+// SetChannelAccess enables access checks for typing events. Without it (tests), typing is
+// sent to everyone.
+func (h *Hub) SetChannelAccess(f ChannelAccessFunc) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.channelAccess = f
 }

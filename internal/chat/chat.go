@@ -1,4 +1,8 @@
 // Package chat handles text channels and their messages.
+//
+// Access rules (M5): every channel has a minimum role to SEE it and a minimum role to WRITE
+// in it. A channel a user cannot see behaves as if it does not exist (ErrChannelNotFound,
+// never "forbidden"), so its existence is not revealed.
 package chat
 
 import (
@@ -15,6 +19,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // Limits (also documented in docs/API.md).
@@ -30,6 +35,9 @@ const (
 var (
 	ErrChannelNotFound  = errors.New("channel not found")
 	ErrChannelNameTaken = errors.New("a channel with this name already exists")
+	ErrMessageNotFound  = errors.New("message not found")
+	// ErrReadOnly: the user can see the channel but not write in it.
+	ErrReadOnly = errors.New("you cannot write in this channel")
 )
 
 // Channel is a text channel, with a preview of its newest message (nil if it has none).
@@ -39,8 +47,16 @@ type Channel struct {
 	Topic       string
 	Type        string
 	Position    int
+	ViewRole    perm.Role // minimum role to see the channel and its messages
+	SendRole    perm.Role // minimum role to write in it (never below ViewRole)
 	LastMessage *Preview
 }
+
+// CanView reports whether a user with this role may see the channel.
+func (c Channel) CanView(r perm.Role) bool { return r.AtLeast(c.ViewRole) }
+
+// CanSend reports whether a user with this role may write in the channel.
+func (c Channel) CanSend(r perm.Role) bool { return c.CanView(r) && r.AtLeast(c.SendRole) }
 
 // Preview is a shortened view of a channel's newest message, for the room list.
 type Preview struct {
@@ -56,12 +72,30 @@ type Message struct {
 	Author    *Author
 	Content   string
 	CreatedAt time.Time
+	// Deleted: removed by a moderator. Content is then "" (the text is erased in the database).
+	Deleted bool
 }
 
 type Author struct {
 	ID          int64
 	Username    string
 	DisplayName string
+}
+
+// ChannelSettings is everything a manager can set on a channel.
+type ChannelSettings struct {
+	Name     string
+	Topic    string
+	ViewRole perm.Role // "" = member
+	SendRole perm.Role // "" = member
+}
+
+// ChannelChanges: nil fields keep their current value.
+type ChannelChanges struct {
+	Name     *string
+	Topic    *string
+	ViewRole *perm.Role
+	SendRole *perm.Role
 }
 
 type Service struct {
@@ -72,117 +106,169 @@ func NewService(pool *pgxpool.Pool) *Service {
 	return &Service{queries: db.New(pool)}
 }
 
-// canManageChannels is the permission check. In M2 only the owner; roles arrive in M5.
-func canManageChannels(u accounts.User) bool {
-	return u.IsOwner
-}
-
-// ListChannels returns every channel, in room-list order. Any logged-in user may call it
-// (per-channel permissions arrive in M5).
-func (s *Service) ListChannels(ctx context.Context) ([]Channel, error) {
+// ListChannels returns the channels the viewer may see, in room-list order.
+func (s *Service) ListChannels(ctx context.Context, viewer accounts.User) ([]Channel, error) {
 	rows, err := s.queries.ListChannels(ctx)
 	if err != nil {
 		return nil, err
 	}
-	channels := make([]Channel, len(rows))
-	for i, r := range rows {
-		channels[i] = Channel{ID: r.ID, Name: r.Name, Topic: r.Topic, Type: r.Type, Position: int(r.Position)}
+	channels := make([]Channel, 0, len(rows))
+	for _, r := range rows {
+		c := Channel{
+			ID: r.ID, Name: r.Name, Topic: r.Topic, Type: r.Type, Position: int(r.Position),
+			ViewRole: perm.Role(r.ViewRole), SendRole: perm.Role(r.SendRole),
+		}
+		if !c.CanView(viewer.Role) {
+			continue
+		}
 		if r.HasLastMessage {
 			p := &Preview{Content: truncate(r.LastContent, previewLength), CreatedAt: r.LastCreatedAt}
 			if r.LastAuthor != nil {
 				p.AuthorName = *r.LastAuthor
 			}
-			channels[i].LastMessage = p
+			c.LastMessage = p
 		}
+		channels = append(channels, c)
 	}
 	return channels, nil
 }
 
-// CreateChannel adds a text channel at the end of the list.
-func (s *Service) CreateChannel(ctx context.Context, by accounts.User, name, topic string) (Channel, error) {
-	if !canManageChannels(by) {
-		return Channel{}, accounts.ErrForbidden
-	}
-	name, topic, err := cleanChannelFields(name, topic)
-	if err != nil {
-		return Channel{}, err
-	}
-	c, err := s.queries.CreateChannel(ctx, db.CreateChannelParams{Name: name, Topic: topic})
-	if err != nil {
-		return Channel{}, mapChannelError(err)
-	}
-	return toChannel(c), nil
-}
-
-// UpdateChannel renames a channel and/or changes its topic. A nil argument keeps the current value.
-func (s *Service) UpdateChannel(ctx context.Context, by accounts.User, id int64, name, topic *string) (Channel, error) {
-	if !canManageChannels(by) {
-		return Channel{}, accounts.ErrForbidden
-	}
-	current, err := s.queries.GetChannel(ctx, id)
+// Channel returns one channel, if the viewer may see it (used for access checks elsewhere).
+func (s *Service) Channel(ctx context.Context, viewer accounts.User, id int64) (Channel, error) {
+	c, err := s.queries.GetChannel(ctx, id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Channel{}, ErrChannelNotFound
 	}
 	if err != nil {
 		return Channel{}, err
 	}
+	ch := toChannel(c)
+	if !ch.CanView(viewer.Role) {
+		return Channel{}, ErrChannelNotFound
+	}
+	return ch, nil
+}
 
-	newName, newTopic := current.Name, current.Topic
-	if name != nil {
-		newName = *name
+// ChannelAccess returns a channel's view and send roles, for the live hub (no user context).
+func (s *Service) ChannelAccess(ctx context.Context, id int64) (view, send perm.Role, ok bool) {
+	c, err := s.queries.GetChannel(ctx, id)
+	if err != nil {
+		return "", "", false
 	}
-	if topic != nil {
-		newTopic = *topic
+	return perm.Role(c.ViewRole), perm.Role(c.SendRole), true
+}
+
+// CreateChannel adds a text channel at the end of the list.
+func (s *Service) CreateChannel(ctx context.Context, by accounts.User, set ChannelSettings) (Channel, error) {
+	if !by.Role.Has(perm.ManageChannels) {
+		return Channel{}, accounts.ErrForbidden
 	}
-	newName, newTopic, err = cleanChannelFields(newName, newTopic)
+	set, err := cleanSettings(by, set)
 	if err != nil {
 		return Channel{}, err
 	}
-
-	c, err := s.queries.UpdateChannel(ctx, db.UpdateChannelParams{ID: id, Name: newName, Topic: newTopic})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Channel{}, ErrChannelNotFound // deleted in the meantime
-	}
+	c, err := s.queries.CreateChannel(ctx, db.CreateChannelParams{
+		Name: set.Name, Topic: set.Topic, ViewRole: string(set.ViewRole), SendRole: string(set.SendRole),
+	})
 	if err != nil {
 		return Channel{}, mapChannelError(err)
 	}
 	return toChannel(c), nil
 }
 
+// UpdateChannel changes a channel's settings. Managers can only change channels they can
+// see, and cannot set access above their own role: otherwise an admin could "unhide" an
+// owner-only channel for themselves.
+// It also returns the PREVIOUS view role, so the caller can tell users who just lost access.
+func (s *Service) UpdateChannel(ctx context.Context, by accounts.User, id int64, ch ChannelChanges) (Channel, perm.Role, error) {
+	if !by.Role.Has(perm.ManageChannels) {
+		return Channel{}, "", accounts.ErrForbidden
+	}
+	current, err := s.Channel(ctx, by, id)
+	if err != nil {
+		return Channel{}, "", err
+	}
+
+	set := ChannelSettings{Name: current.Name, Topic: current.Topic, ViewRole: current.ViewRole, SendRole: current.SendRole}
+	if ch.Name != nil {
+		set.Name = *ch.Name
+	}
+	if ch.Topic != nil {
+		set.Topic = *ch.Topic
+	}
+	if ch.ViewRole != nil {
+		set.ViewRole = *ch.ViewRole
+	}
+	if ch.SendRole != nil {
+		set.SendRole = *ch.SendRole
+	} else if !set.SendRole.AtLeast(set.ViewRole) {
+		// Only "who can see" was raised: raise "who can write" with it (nobody can write
+		// in a channel they cannot see), instead of rejecting the change.
+		set.SendRole = set.ViewRole
+	}
+	set, err = cleanSettings(by, set)
+	if err != nil {
+		return Channel{}, "", err
+	}
+
+	c, err := s.queries.UpdateChannel(ctx, db.UpdateChannelParams{
+		ID: id, Name: set.Name, Topic: set.Topic, ViewRole: string(set.ViewRole), SendRole: string(set.SendRole),
+	})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Channel{}, "", ErrChannelNotFound // deleted in the meantime
+	}
+	if err != nil {
+		return Channel{}, "", mapChannelError(err)
+	}
+	return toChannel(c), current.ViewRole, nil
+}
+
 // DeleteChannel deletes a channel AND all its messages. This cannot be undone.
-func (s *Service) DeleteChannel(ctx context.Context, by accounts.User, id int64) error {
-	if !canManageChannels(by) {
-		return accounts.ErrForbidden
+// Returns the deleted channel (its access roles decide who is told about it).
+func (s *Service) DeleteChannel(ctx context.Context, by accounts.User, id int64) (Channel, error) {
+	if !by.Role.Has(perm.ManageChannels) {
+		return Channel{}, accounts.ErrForbidden
+	}
+	c, err := s.Channel(ctx, by, id) // only channels you can see
+	if err != nil {
+		return Channel{}, err
 	}
 	n, err := s.queries.DeleteChannel(ctx, id)
 	if err != nil {
-		return err
+		return Channel{}, err
 	}
 	if n == 0 {
-		return ErrChannelNotFound
+		return Channel{}, ErrChannelNotFound
 	}
-	return nil
+	return c, nil
 }
 
 // SendMessage posts a message to a channel as the given user.
-func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (Message, error) {
+func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (Message, Channel, error) {
 	content, err := cleanMessage(content)
 	if err != nil {
-		return Message{}, err
+		return Message{}, Channel{}, err
+	}
+	c, err := s.Channel(ctx, by, channelID)
+	if err != nil {
+		return Message{}, Channel{}, err
+	}
+	if !c.CanSend(by.Role) {
+		return Message{}, Channel{}, ErrReadOnly
 	}
 
 	m, err := s.queries.CreateMessage(ctx, db.CreateMessageParams{ChannelID: channelID, AuthorID: &by.ID, Content: content})
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation: no such channel
-			return Message{}, ErrChannelNotFound
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" { // foreign_key_violation: deleted meanwhile
+			return Message{}, Channel{}, ErrChannelNotFound
 		}
-		return Message{}, err
+		return Message{}, Channel{}, err
 	}
 	return Message{
 		ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt,
 		Author: &Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName},
-	}, nil
+	}, c, nil
 }
 
 // ListMessages returns one page of a channel's history in chronological order (oldest first).
@@ -193,15 +279,13 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 // This is "keyset" pagination: it asks for "the 50 messages before id X", instead of
 // "skip 5000 messages, then take 50" (offset pagination). It stays fast however long the
 // history is, and new messages arriving meanwhile cannot shift the pages.
-func (s *Service) ListMessages(ctx context.Context, channelID, before int64, limit int) (msgs []Message, hasMore bool, err error) {
+func (s *Service) ListMessages(ctx context.Context, viewer accounts.User, channelID, before int64, limit int) (msgs []Message, hasMore bool, err error) {
 	if limit <= 0 {
 		limit = DefaultPageSize
 	}
 	limit = min(limit, MaxPageSize)
 
-	if _, err := s.queries.GetChannel(ctx, channelID); errors.Is(err, pgx.ErrNoRows) {
-		return nil, false, ErrChannelNotFound
-	} else if err != nil {
+	if _, err := s.Channel(ctx, viewer, channelID); err != nil {
 		return nil, false, err
 	}
 
@@ -220,7 +304,7 @@ func (s *Service) ListMessages(ctx context.Context, channelID, before int64, lim
 	// The query returns newest first; the client wants oldest first.
 	msgs = make([]Message, len(rows))
 	for i, r := range rows {
-		m := Message{ID: r.ID, ChannelID: r.ChannelID, Content: r.Content, CreatedAt: r.CreatedAt}
+		m := Message{ID: r.ID, ChannelID: r.ChannelID, Content: r.Content, CreatedAt: r.CreatedAt, Deleted: r.Deleted}
 		if r.AuthorID != nil && r.AuthorUsername != nil && r.AuthorDisplayName != nil {
 			m.Author = &Author{ID: *r.AuthorID, Username: *r.AuthorUsername, DisplayName: *r.AuthorDisplayName}
 		}
@@ -230,7 +314,10 @@ func (s *Service) ListMessages(ctx context.Context, channelID, before int64, lim
 }
 
 func toChannel(c db.Channel) Channel {
-	return Channel{ID: c.ID, Name: c.Name, Topic: c.Topic, Type: c.Type, Position: int(c.Position)}
+	return Channel{
+		ID: c.ID, Name: c.Name, Topic: c.Topic, Type: c.Type, Position: int(c.Position),
+		ViewRole: perm.Role(c.ViewRole), SendRole: perm.Role(c.SendRole),
+	}
 }
 
 func mapChannelError(err error) error {
@@ -239,6 +326,36 @@ func mapChannelError(err error) error {
 		return ErrChannelNameTaken
 	}
 	return err
+}
+
+// cleanSettings validates channel settings. Access roles must be valid, writing needs at
+// least the role for seeing, and neither may be above the manager's own role (no locking
+// yourself out, no creating channels you could then not manage).
+func cleanSettings(by accounts.User, set ChannelSettings) (ChannelSettings, error) {
+	name, topic, err := cleanChannelFields(set.Name, set.Topic)
+	if err != nil {
+		return ChannelSettings{}, err
+	}
+	set.Name, set.Topic = name, topic
+	if set.ViewRole == "" {
+		set.ViewRole = perm.Member
+	}
+	if set.SendRole == "" {
+		set.SendRole = set.ViewRole
+	}
+	if !set.ViewRole.Valid() {
+		return ChannelSettings{}, &accounts.ValidationError{Field: "view_role", Message: "must be owner, admin, moderator, or member"}
+	}
+	if !set.SendRole.Valid() {
+		return ChannelSettings{}, &accounts.ValidationError{Field: "send_role", Message: "must be owner, admin, moderator, or member"}
+	}
+	if !set.SendRole.AtLeast(set.ViewRole) {
+		return ChannelSettings{}, &accounts.ValidationError{Field: "send_role", Message: "cannot be lower than view_role (you cannot write where you cannot read)"}
+	}
+	if set.ViewRole.Above(by.Role) || set.SendRole.Above(by.Role) {
+		return ChannelSettings{}, accounts.ErrForbidden
+	}
+	return set, nil
 }
 
 // cleanChannelFields trims and validates a channel name and topic.
@@ -299,4 +416,40 @@ func truncate(s string, maxRunes int) string {
 		return s
 	}
 	return string([]rune(s)[:maxRunes]) + "…"
+}
+
+// DeleteMessage erases a message's text (for real, in the database) and leaves a
+// "message deleted" placeholder. Needs the delete_messages permission, and the author must
+// be below you (a moderator cannot delete an admin's message). Messages of deleted accounts
+// can always be removed by someone with the permission.
+// Returns the channel, so the caller can tell exactly the users who can see it.
+func (s *Service) DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (Channel, error) {
+	c, err := s.Channel(ctx, by, channelID) // only in channels you can see
+	if err != nil {
+		return Channel{}, err
+	}
+	m, err := s.queries.GetMessageWithAuthor(ctx, db.GetMessageWithAuthorParams{ID: messageID, ChannelID: channelID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Channel{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Channel{}, err
+	}
+
+	authorRole := perm.Role("") // deleted account: below everyone
+	if m.AuthorRole != nil {
+		authorRole = perm.Role(*m.AuthorRole)
+	}
+	if !perm.CanActOn(by.Role, perm.DeleteMessages, authorRole) {
+		return Channel{}, accounts.ErrForbidden
+	}
+
+	n, err := s.queries.DeleteMessage(ctx, db.DeleteMessageParams{ID: messageID, DeletedBy: &by.ID})
+	if err != nil {
+		return Channel{}, err
+	}
+	if n == 0 {
+		return Channel{}, ErrMessageNotFound // deleted by someone else meanwhile
+	}
+	return c, nil
 }

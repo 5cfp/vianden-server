@@ -44,15 +44,22 @@ func validateDisplayName(name string) error {
 	if n < 1 || n > MaxDisplayNameLength {
 		return &ValidationError{"display_name", "must be 1-32 characters"}
 	}
-	for _, r := range name {
-		// Control characters and invisible formatting characters are rejected. Some of them
-		// (like U+202E "right-to-left override") can make text display reversed, a classic
-		// spoofing trick. U+200D (zero-width joiner) is allowed because emoji need it.
-		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != 0x200D) {
-			return &ValidationError{"display_name", "contains invisible or control characters"}
-		}
+	if hasHiddenCharacters(name) {
+		return &ValidationError{"display_name", "contains invisible or control characters"}
 	}
 	return nil
+}
+
+// hasHiddenCharacters reports control characters and invisible formatting characters. Some
+// of them (like U+202E "right-to-left override") can make text display reversed, a classic
+// spoofing trick. U+200D (zero-width joiner) is allowed because emoji need it.
+func hasHiddenCharacters(s string) bool {
+	for _, r := range s {
+		if unicode.IsControl(r) || (unicode.Is(unicode.Cf, r) && r != 0x200D) {
+			return true
+		}
+	}
+	return false
 }
 
 // validatePassword follows NIST SP 800-63B: length matters, forced complexity rules do not.

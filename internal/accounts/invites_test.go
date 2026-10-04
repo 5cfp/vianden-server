@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 func TestOwnerCreatesInviteThatWorks(t *testing.T) {
@@ -138,5 +140,20 @@ func TestDeletingUsedInviteKeepsAccounts(t *testing.T) {
 	}
 	if n := count(t, pool, "SELECT count(*) FROM users WHERE username = 'friend'"); n != 1 {
 		t.Error("deleting an invite removed the account created with it")
+	}
+}
+
+func TestInviteManagementFollowsRoles(t *testing.T) {
+	svc, setupToken, _ := newService(t)
+	registerOwner(t, svc, setupToken)
+	for role, allowed := range map[perm.Role]bool{perm.Admin: true, perm.Moderator: false, perm.Member: false} {
+		u := User{ID: 1, Username: "x", Role: role} // only the role matters for the check
+		_, _, err := svc.CreateInvite(ctx, u, 1, 1)
+		if allowed && err != nil {
+			t.Errorf("%s should manage invites: %v", role, err)
+		}
+		if !allowed && !errors.Is(err, ErrForbidden) {
+			t.Errorf("%s: err = %v, want ErrForbidden", role, err)
+		}
 	}
 }

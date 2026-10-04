@@ -4,13 +4,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
-var osama = accounts.User{ID: 1, Username: "osama", DisplayName: "Osama", IsOwner: true}
+var osama = accounts.User{ID: 1, Username: "osama", DisplayName: "Osama", Role: perm.Owner}
 
 // send makes a request with an optional bearer token and JSON body.
 func send(t *testing.T, h http.Handler, method, path, token, body string) *httptest.ResponseRecorder {
@@ -61,7 +63,7 @@ func TestMeWithValidToken(t *testing.T) {
 			t.Errorf("%q: status = %d, want 200", header, rec.Code)
 			continue
 		}
-		if got := decode[meResponse](t, rec).User; got != toUserResponse(osama) {
+		if got := decode[meResponse](t, rec).User; !reflect.DeepEqual(got, toUserResponse(osama)) {
 			t.Errorf("%q: user = %+v", header, got)
 		}
 	}

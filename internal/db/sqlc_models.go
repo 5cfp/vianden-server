@@ -15,6 +15,8 @@ type Channel struct {
 	Type      string
 	Position  int32
 	CreatedAt time.Time
+	ViewRole  string
+	SendRole  string
 }
 
 type Invite struct {
@@ -33,6 +35,8 @@ type Message struct {
 	AuthorID  *int64
 	Content   string
 	CreatedAt time.Time
+	DeletedAt *time.Time
+	DeletedBy *int64
 }
 
 type Session struct {
@@ -50,6 +54,8 @@ type User struct {
 	Username     string
 	DisplayName  string
 	PasswordHash string
-	IsOwner      bool
 	CreatedAt    time.Time
+	Role         string
+	BannedAt     *time.Time
+	BanReason    string
 }

@@ -1,8 +1,8 @@
 -- name: OwnerExists :one
-SELECT EXISTS (SELECT 1 FROM users WHERE is_owner);
+SELECT EXISTS (SELECT 1 FROM users WHERE role = 'owner');
 
 -- name: CreateUser :one
-INSERT INTO users (username, display_name, password_hash, is_owner)
+INSERT INTO users (username, display_name, password_hash, role)
 VALUES ($1, $2, $3, $4)
 RETURNING *;
 
@@ -31,7 +31,8 @@ FROM sessions
 JOIN users ON users.id = sessions.user_id
 WHERE sessions.token_hash = $1
   AND sessions.revoked_at IS NULL
-  AND sessions.expires_at > now();
+  AND sessions.expires_at > now()
+  AND users.banned_at IS NULL;
 
 -- name: TouchSession :exec
 -- Sliding expiry: a used session stays valid for another full lifetime.

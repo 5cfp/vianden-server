@@ -15,6 +15,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/auth"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // SessionLifetime is how long a session stays valid without being used.
@@ -67,8 +68,11 @@ type User struct {
 	ID          int64
 	Username    string
 	DisplayName string
-	IsOwner     bool
+	Role        perm.Role
 }
+
+// IsOwner reports whether the user is the server owner.
+func (u User) IsOwner() bool { return u.Role == perm.Owner }
 
 // AuthResult is an account plus a new session token (returned by Register and Login).
 type AuthResult struct {
@@ -96,7 +100,8 @@ func (s *Service) Register(ctx context.Context, in RegisterInput) (AuthResult, e
 	}
 
 	code := strings.TrimSpace(in.InviteCode)
-	user := db.CreateUserParams{Username: username, DisplayName: displayName}
+	// New accounts are members; registerOwner raises the first one to owner.
+	user := db.CreateUserParams{Username: username, DisplayName: displayName, Role: string(perm.Member)}
 
 	if strings.HasPrefix(code, auth.SetupTokenPrefix) {
 		return s.registerOwner(ctx, code, user, in.Password)
@@ -110,7 +115,7 @@ func (s *Service) registerOwner(ctx context.Context, setupToken string, user db.
 	}
 
 	user.PasswordHash = auth.HashPassword(password)
-	user.IsOwner = true
+	user.Role = string(perm.Owner)
 
 	result, err := s.inTx(ctx, func(q *db.Queries) (AuthResult, error) {
 		return s.createUserWithSession(ctx, q, user)

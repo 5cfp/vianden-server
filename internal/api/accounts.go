@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 type registerRequest struct {
@@ -21,6 +22,9 @@ type userResponse struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	IsOwner     bool   `json:"is_owner"`
+	Role        string `json:"role"`
+	// What this user may do. Lets clients hide buttons; the server still checks every request.
+	Permissions []perm.Permission `json:"permissions"`
 }
 
 type sessionResponse struct {
@@ -29,7 +33,10 @@ type sessionResponse struct {
 }
 
 func toUserResponse(u accounts.User) userResponse {
-	return userResponse{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, IsOwner: u.IsOwner}
+	return userResponse{
+		ID: u.ID, Username: u.Username, DisplayName: u.DisplayName,
+		IsOwner: u.IsOwner(), Role: string(u.Role), Permissions: u.Role.Permissions(),
+	}
 }
 
 func handleRegister(svc Accounts, logger *slog.Logger) http.HandlerFunc {
@@ -51,7 +58,7 @@ func handleRegister(svc Accounts, logger *slog.Logger) http.HandlerFunc {
 		switch {
 		case err == nil:
 			// Never log the token or the password.
-			logger.Info("user registered", "user_id", result.User.ID, "username", result.User.Username, "owner", result.User.IsOwner)
+			logger.Info("user registered", "user_id", result.User.ID, "username", result.User.Username, "role", result.User.Role)
 			writeJSON(w, http.StatusCreated, sessionResponse{User: toUserResponse(result.User), Token: result.SessionToken})
 		case errors.As(err, &invalid):
 			writeError(w, http.StatusBadRequest, "invalid_"+invalid.Field, invalid.Error())
@@ -86,6 +93,14 @@ func handleLogin(svc Accounts, logger *slog.Logger) http.HandlerFunc {
 		case err == nil:
 			logger.Info("user logged in", "user_id", result.User.ID, "ip", clientIP(r))
 			writeJSON(w, http.StatusOK, sessionResponse{User: toUserResponse(result.User), Token: result.SessionToken})
+		case errors.Is(err, accounts.ErrBanned):
+			msg := "this account is banned"
+			var banned *accounts.BannedError
+			if errors.As(err, &banned) && banned.Reason != "" {
+				msg += ": " + banned.Reason
+			}
+			logger.Warn("banned user tried to log in", "username", forLog(req.Username), "ip", clientIP(r))
+			writeError(w, http.StatusForbidden, "account_banned", msg)
 		case errors.Is(err, accounts.ErrInvalidCredentials):
 			// Logged so the owner can spot password guessing. slog escapes the values,
 			// so a username with line breaks cannot forge fake log lines.

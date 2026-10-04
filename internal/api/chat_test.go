@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/chat"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // fakeChat returns fixed results and records what it was asked.
@@ -20,6 +22,9 @@ type fakeChat struct {
 	hasMore  bool
 	err      error
 	got      *chatCall
+
+	channelView  perm.Role // view role of the channel in Send/Delete results ("" = member)
+	previousView perm.Role // returned by UpdateChannel
 }
 
 type chatCall struct {
@@ -27,6 +32,8 @@ type chatCall struct {
 	channelID   int64
 	name, topic *string
 	content     string
+	viewRole    perm.Role
+	sendRole    perm.Role
 	before      int64
 	limit       int
 }
@@ -37,39 +44,56 @@ func (f fakeChat) record(c chatCall) {
 	}
 }
 
-func (f fakeChat) ListChannels(context.Context) ([]chat.Channel, error) { return f.channels, f.err }
+func (f fakeChat) ListChannels(context.Context, accounts.User) ([]chat.Channel, error) {
+	return f.channels, f.err
+}
 
-func (f fakeChat) CreateChannel(_ context.Context, by accounts.User, name, topic string) (chat.Channel, error) {
-	f.record(chatCall{by: by, name: &name, topic: &topic})
+func (f fakeChat) CreateChannel(_ context.Context, by accounts.User, set chat.ChannelSettings) (chat.Channel, error) {
+	f.record(chatCall{by: by, name: &set.Name, topic: &set.Topic, viewRole: set.ViewRole, sendRole: set.SendRole})
 	if f.err != nil {
 		return chat.Channel{}, f.err
 	}
-	return chat.Channel{ID: 3, Name: name, Topic: topic, Type: "text", Position: 2}, nil
+	return chat.Channel{ID: 3, Name: set.Name, Topic: set.Topic, Type: "text", Position: 2, ViewRole: or(set.ViewRole), SendRole: or(set.SendRole)}, nil
 }
 
-func (f fakeChat) UpdateChannel(_ context.Context, by accounts.User, id int64, name, topic *string) (chat.Channel, error) {
-	f.record(chatCall{by: by, channelID: id, name: name, topic: topic})
-	if f.err != nil {
-		return chat.Channel{}, f.err
+func or(r perm.Role) perm.Role {
+	if r == "" {
+		return perm.Member
 	}
-	return chat.Channel{ID: id, Name: "Renamed", Type: "text"}, nil
+	return r
 }
 
-func (f fakeChat) DeleteChannel(_ context.Context, by accounts.User, id int64) error {
+func (f fakeChat) UpdateChannel(_ context.Context, by accounts.User, id int64, ch chat.ChannelChanges) (chat.Channel, perm.Role, error) {
+	c := chatCall{by: by, channelID: id, name: ch.Name, topic: ch.Topic}
+	if ch.ViewRole != nil {
+		c.viewRole = *ch.ViewRole
+	}
+	f.record(c)
+	if f.err != nil {
+		return chat.Channel{}, "", f.err
+	}
+	view := perm.Member
+	if ch.ViewRole != nil {
+		view = *ch.ViewRole
+	}
+	return chat.Channel{ID: id, Name: "Renamed", Type: "text", ViewRole: view, SendRole: view}, f.previousView, nil
+}
+
+func (f fakeChat) DeleteChannel(_ context.Context, by accounts.User, id int64) (chat.Channel, error) {
 	f.record(chatCall{by: by, channelID: id})
-	return f.err
+	return chat.Channel{ID: id, ViewRole: f.channelView, SendRole: f.channelView}, f.err
 }
 
-func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string) (chat.Message, error) {
+func (f fakeChat) SendMessage(_ context.Context, by accounts.User, channelID int64, content string) (chat.Message, chat.Channel, error) {
 	f.record(chatCall{by: by, channelID: channelID, content: content})
 	if f.err != nil {
-		return chat.Message{}, f.err
+		return chat.Message{}, chat.Channel{}, f.err
 	}
 	return chat.Message{ID: 10, ChannelID: channelID, Content: content, CreatedAt: when,
-		Author: &chat.Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName}}, nil
+		Author: &chat.Author{ID: by.ID, Username: by.Username, DisplayName: by.DisplayName}}, chat.Channel{ID: channelID, ViewRole: f.channelView, SendRole: f.channelView}, nil
 }
 
-func (f fakeChat) ListMessages(_ context.Context, channelID, before int64, limit int) ([]chat.Message, bool, error) {
+func (f fakeChat) ListMessages(_ context.Context, _ accounts.User, channelID, before int64, limit int) ([]chat.Message, bool, error) {
 	f.record(chatCall{channelID: channelID, before: before, limit: limit})
 	return f.messages, f.hasMore, f.err
 }
@@ -108,13 +132,13 @@ func TestChatEndpointsNeedLogin(t *testing.T) {
 
 func TestListChannelsResponse(t *testing.T) {
 	h := chatHandler(fakeChat{channels: []chat.Channel{
-		{ID: 1, Name: "General", Topic: "chat", Type: "text", LastMessage: &chat.Preview{AuthorName: "Sara", Content: "hi", CreatedAt: when}},
-		{ID: 2, Name: "Empty", Type: "text", Position: 1},
+		{ID: 1, Name: "General", Topic: "chat", Type: "text", ViewRole: perm.Member, SendRole: perm.Moderator, LastMessage: &chat.Preview{AuthorName: "Sara", Content: "hi", CreatedAt: when}},
+		{ID: 2, Name: "Empty", Type: "text", Position: 1, ViewRole: perm.Member, SendRole: perm.Member},
 	}})
 	rec := send(t, h, "GET", "/api/v1/channels", "Bearer vs_member", "")
 	want := `{"channels":[` +
-		`{"id":1,"name":"General","topic":"chat","type":"text","position":0,"last_message":{"author_name":"Sara","content":"hi","created_at":"2026-10-04T18:30:00Z"}},` +
-		`{"id":2,"name":"Empty","topic":"","type":"text","position":1,"last_message":null}]}` + "\n"
+		`{"id":1,"name":"General","topic":"chat","type":"text","position":0,"view_role":"member","send_role":"moderator","last_message":{"author_name":"Sara","content":"hi","created_at":"2026-10-04T18:30:00Z"}},` +
+		`{"id":2,"name":"Empty","topic":"","type":"text","position":1,"view_role":"member","send_role":"member","last_message":null}]}` + "\n"
 	if rec.Code != http.StatusOK || rec.Body.String() != want {
 		t.Errorf("status %d\n got: %s\nwant: %s", rec.Code, rec.Body, want)
 	}
@@ -180,7 +204,7 @@ func TestSendMessage(t *testing.T) {
 	if got.by.ID != member.ID || got.channelID != 4 || got.content != "hello" {
 		t.Errorf("call %+v: the message must be sent as the logged-in user", got)
 	}
-	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z"}}` + "\n"
+	want := `{"message":{"id":10,"channel_id":4,"author":{"id":2,"username":"friend","display_name":"Friend"},"content":"hello","created_at":"2026-10-04T18:30:00Z","deleted":false}}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -219,7 +243,7 @@ func TestListMessagesQuery(t *testing.T) {
 	if rec.Code != http.StatusOK || got.before != 42 || got.limit != 20 {
 		t.Fatalf("status %d, call %+v", rec.Code, got)
 	}
-	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z"}],"has_more":true}` + "\n"
+	want := `{"messages":[{"id":5,"channel_id":1,"author":null,"content":"old","created_at":"2026-10-04T18:30:00Z","deleted":false}],"has_more":true}` + "\n"
 	if rec.Body.String() != want {
 		t.Errorf("\n got: %s\nwant: %s", rec.Body, want)
 	}
@@ -243,5 +267,51 @@ func TestEmptyListsAreArraysNotNull(t *testing.T) {
 	}
 	if rec := send(t, h, "GET", "/api/v1/channels/1/messages", "Bearer vs_member", ""); rec.Body.String() != "{\"messages\":[],\"has_more\":false}\n" {
 		t.Errorf("messages: %s", rec.Body)
+	}
+}
+
+func (f fakeChat) DeleteMessage(_ context.Context, by accounts.User, channelID, messageID int64) (chat.Channel, error) {
+	f.record(chatCall{by: by, channelID: channelID, before: messageID})
+	return chat.Channel{ID: channelID, ViewRole: or(f.channelView), SendRole: or(f.channelView)}, f.err
+}
+
+func TestDeleteMessage(t *testing.T) {
+	var got chatCall
+	rt := &fakeRealtime{}
+	h := realtimeHandler(rt, fakeChat{got: &got, channelView: perm.Moderator})
+
+	rec := send(t, h, "DELETE", "/api/v1/channels/4/messages/77", "Bearer vs_owner", "")
+	if rec.Code != http.StatusNoContent || got.channelID != 4 || got.before != 77 || got.by.ID != osama.ID {
+		t.Fatalf("status %d, call %+v", rec.Code, got)
+	}
+	if rt.events[0] != "message.deleted" || !reflect.DeepEqual(rt.audience(0), []perm.Role{perm.Owner, perm.Admin, perm.Moderator}) {
+		t.Errorf("event %v reached %v; want message.deleted for moderators and up", rt.events, rt.audience(0))
+	}
+	if d := rt.data[0].(map[string]int64); d["id"] != 77 || d["channel_id"] != 4 {
+		t.Errorf("event data %v", d)
+	}
+}
+
+func TestDeleteMessageErrors(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		code int
+		want string
+	}{
+		{accounts.ErrForbidden, 403, "forbidden"},
+		{chat.ErrMessageNotFound, 404, "not_found"},
+		{chat.ErrChannelNotFound, 404, "not_found"},
+	} {
+		rt := &fakeRealtime{}
+		rec := send(t, realtimeHandler(rt, fakeChat{err: c.err}), "DELETE", "/api/v1/channels/4/messages/77", "Bearer vs_member", "")
+		if rec.Code != c.code || decode[errorResponse](t, rec).Error.Code != c.want {
+			t.Errorf("%v: %d, want %d %s", c.err, rec.Code, c.code, c.want)
+		}
+		if len(rt.events) != 0 {
+			t.Errorf("%v: event sent although deleting failed", c.err)
+		}
+	}
+	if rec := send(t, chatHandler(fakeChat{}), "DELETE", "/api/v1/channels/4/messages/abc", "Bearer vs_owner", ""); rec.Code != 404 {
+		t.Errorf("bad message id: %d", rec.Code)
 	}
 }

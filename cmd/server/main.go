@@ -82,13 +82,15 @@ func run(logger *slog.Logger) error {
 	}
 
 	// The hub keeps all live (WebSocket) connections and pushes events to them.
+	chatService := chat.NewService(pool)
 	hub := realtime.NewHub(logger)
+	hub.SetChannelAccess(chatService.ChannelAccess) // typing only in channels the sender may see
 
 	handler := api.NewHandler(api.Deps{
 		ServerName: cfg.ServerName,
 		DB:         pool,
 		Accounts:   accountService,
-		Chat:       chat.NewService(pool),
+		Chat:       chatService,
 		Realtime:   hub,
 		Logger:     logger,
 	})

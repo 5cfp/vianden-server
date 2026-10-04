@@ -11,6 +11,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/auth"
 	"github.com/5cfp/vianden-server/internal/db"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // touchInterval: a session's expiry is pushed forward at most once per hour,
@@ -54,6 +55,11 @@ func (s *Service) Login(ctx context.Context, username, password string) (AuthRes
 	if !ok {
 		return AuthResult{}, ErrInvalidCredentials
 	}
+	// Checked only AFTER the password is correct: someone guessing passwords cannot learn
+	// which accounts exist or are banned.
+	if u.BannedAt != nil {
+		return AuthResult{}, &BannedError{Reason: u.BanReason}
+	}
 
 	token, err := createSession(ctx, s.queries, u.ID)
 	if err != nil {
@@ -92,7 +98,7 @@ func (s *Service) Logout(ctx context.Context, sessionID int64) error {
 }
 
 func toUser(u db.User) User {
-	return User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, IsOwner: u.IsOwner}
+	return User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: perm.Role(u.Role)}
 }
 
 // DeleteOldSessions removes expired and logged-out sessions; returns how many.

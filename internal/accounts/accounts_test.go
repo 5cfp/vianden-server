@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/5cfp/vianden-server/internal/auth"
+	"github.com/5cfp/vianden-server/internal/perm"
 	"github.com/5cfp/vianden-server/internal/testdb"
 )
 
@@ -69,7 +70,7 @@ func TestOwnerSetup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !res.User.IsOwner || res.User.Username != "osama" || res.User.DisplayName != "Osama" {
+	if !res.User.IsOwner() || res.User.Username != "osama" || res.User.DisplayName != "Osama" {
 		t.Errorf("unexpected user: %+v", res.User)
 	}
 
@@ -136,7 +137,7 @@ func TestRegisterWithInvite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.User.IsOwner || res.User.DisplayName != "My Friend" {
+	if res.User.Role != perm.Member || res.User.DisplayName != "My Friend" {
 		t.Errorf("unexpected user: %+v", res.User)
 	}
 	if n := count(t, pool, "SELECT uses FROM invites"); n != 1 {
@@ -253,7 +254,7 @@ func TestConcurrentOwnerSetup(t *testing.T) {
 	}
 	wg.Wait()
 
-	if n := count(t, pool, "SELECT count(*) FROM users WHERE is_owner"); n != 1 {
+	if n := count(t, pool, "SELECT count(*) FROM users WHERE role = 'owner'"); n != 1 {
 		t.Errorf("owners = %d, want exactly 1", n)
 	}
 	for _, err := range errs {

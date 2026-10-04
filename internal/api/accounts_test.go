@@ -5,10 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/5cfp/vianden-server/internal/accounts"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // fakeAccounts returns fixed results or errors, and remembers what it received.
@@ -29,6 +31,11 @@ type fakeAccounts struct {
 	inviteErr error
 	gotInvite *[3]int64 // receives (user ID, maxUses, hours)
 	deleted   *int64
+
+	// For member management.
+	members    []accounts.Member
+	memberErr  error
+	memberCall *memberCall
 }
 
 func (f fakeAccounts) CreateInvite(_ context.Context, by accounts.User, maxUses, hours int) (accounts.Invite, string, error) {
@@ -93,7 +100,7 @@ func TestRegisterSuccess(t *testing.T) {
 	var got accounts.RegisterInput
 	acc := fakeAccounts{
 		result: accounts.AuthResult{
-			User:         accounts.User{ID: 7, Username: "osama", DisplayName: "Osama", IsOwner: true},
+			User:         accounts.User{ID: 7, Username: "osama", DisplayName: "Osama", Role: perm.Owner},
 			SessionToken: "vs_secret",
 		},
 		got: &got,
@@ -108,7 +115,8 @@ func TestRegisterSuccess(t *testing.T) {
 		t.Errorf("service received %+v", got)
 	}
 	body := decode[sessionResponse](t, rec)
-	if body.Token != "vs_secret" || body.User != (userResponse{ID: 7, Username: "osama", DisplayName: "Osama", IsOwner: true}) {
+	want := userResponse{ID: 7, Username: "osama", DisplayName: "Osama", IsOwner: true, Role: "owner", Permissions: perm.Owner.Permissions()}
+	if body.Token != "vs_secret" || !reflect.DeepEqual(body.User, want) {
 		t.Errorf("unexpected response: %+v", body)
 	}
 	if cc := rec.Header().Get("Cache-Control"); cc != "no-store" {
@@ -173,4 +181,46 @@ func TestRegisterOnlyAcceptsPost(t *testing.T) {
 	if rec.Code == http.StatusCreated || rec.Code == http.StatusOK {
 		t.Errorf("GET /register returned %d", rec.Code)
 	}
+}
+
+// ---- member management fakes (members_test.go) ----
+
+func (f fakeAccounts) ListMembers(context.Context) ([]accounts.Member, error) {
+	return f.members, f.memberErr
+}
+
+func (f fakeAccounts) SetRole(_ context.Context, by accounts.User, id int64, role perm.Role) (accounts.Member, error) {
+	f.recordMember("role", by, id, string(role))
+	if f.memberErr != nil {
+		return accounts.Member{}, f.memberErr
+	}
+	return accounts.Member{User: accounts.User{ID: id, Username: "target", DisplayName: "Target", Role: role}}, nil
+}
+
+func (f fakeAccounts) Kick(_ context.Context, by accounts.User, id int64) error {
+	f.recordMember("kick", by, id, "")
+	return f.memberErr
+}
+
+func (f fakeAccounts) Ban(_ context.Context, by accounts.User, id int64, reason string) error {
+	f.recordMember("ban", by, id, reason)
+	return f.memberErr
+}
+
+func (f fakeAccounts) Unban(_ context.Context, by accounts.User, id int64) error {
+	f.recordMember("unban", by, id, "")
+	return f.memberErr
+}
+
+func (f fakeAccounts) recordMember(action string, by accounts.User, id int64, arg string) {
+	if f.memberCall != nil {
+		*f.memberCall = memberCall{action, by.ID, id, arg}
+	}
+}
+
+type memberCall struct {
+	action string
+	byID   int64
+	target int64
+	arg    string
 }

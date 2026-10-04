@@ -10,17 +10,19 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/chat"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // Chat is the channel and message logic the API needs.
 // The real server passes a *chat.Service; tests pass a fake.
 type Chat interface {
-	ListChannels(ctx context.Context) ([]chat.Channel, error)
-	CreateChannel(ctx context.Context, by accounts.User, name, topic string) (chat.Channel, error)
-	UpdateChannel(ctx context.Context, by accounts.User, id int64, name, topic *string) (chat.Channel, error)
-	DeleteChannel(ctx context.Context, by accounts.User, id int64) error
-	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (chat.Message, error)
-	ListMessages(ctx context.Context, channelID, before int64, limit int) ([]chat.Message, bool, error)
+	ListChannels(ctx context.Context, viewer accounts.User) ([]chat.Channel, error)
+	CreateChannel(ctx context.Context, by accounts.User, set chat.ChannelSettings) (chat.Channel, error)
+	UpdateChannel(ctx context.Context, by accounts.User, id int64, ch chat.ChannelChanges) (chat.Channel, perm.Role, error)
+	DeleteChannel(ctx context.Context, by accounts.User, id int64) (chat.Channel, error)
+	SendMessage(ctx context.Context, by accounts.User, channelID int64, content string) (chat.Message, chat.Channel, error)
+	ListMessages(ctx context.Context, viewer accounts.User, channelID, before int64, limit int) ([]chat.Message, bool, error)
+	DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (chat.Channel, error)
 }
 
 type channelResponse struct {
@@ -29,6 +31,8 @@ type channelResponse struct {
 	Topic       string           `json:"topic"`
 	Type        string           `json:"type"`
 	Position    int              `json:"position"`
+	ViewRole    string           `json:"view_role"`    // minimum role to see the channel
+	SendRole    string           `json:"send_role"`    // minimum role to write in it
 	LastMessage *previewResponse `json:"last_message"` // null when the channel has no messages
 }
 
@@ -50,10 +54,15 @@ type messageResponse struct {
 	Author    *authorResponse `json:"author"` // null if the account no longer exists
 	Content   string          `json:"content"`
 	CreatedAt time.Time       `json:"created_at"`
+	// Deleted by a moderator: content is "" and should be shown as "Message deleted".
+	Deleted bool `json:"deleted"`
 }
 
 func toChannelResponse(c chat.Channel) channelResponse {
-	r := channelResponse{ID: c.ID, Name: c.Name, Topic: c.Topic, Type: c.Type, Position: c.Position}
+	r := channelResponse{
+		ID: c.ID, Name: c.Name, Topic: c.Topic, Type: c.Type, Position: c.Position,
+		ViewRole: string(c.ViewRole), SendRole: string(c.SendRole),
+	}
 	if p := c.LastMessage; p != nil {
 		r.LastMessage = &previewResponse{AuthorName: p.AuthorName, Content: p.Content, CreatedAt: p.CreatedAt.UTC()}
 	}
@@ -61,7 +70,7 @@ func toChannelResponse(c chat.Channel) channelResponse {
 }
 
 func toMessageResponse(m chat.Message) messageResponse {
-	r := messageResponse{ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt.UTC()}
+	r := messageResponse{ID: m.ID, ChannelID: m.ChannelID, Content: m.Content, CreatedAt: m.CreatedAt.UTC(), Deleted: m.Deleted}
 	if a := m.Author; a != nil {
 		r.Author = &authorResponse{ID: a.ID, Username: a.Username, DisplayName: a.DisplayName}
 	}
@@ -69,8 +78,8 @@ func toMessageResponse(m chat.Message) messageResponse {
 }
 
 func handleListChannels(svc Chat, logger *slog.Logger) authedHandler {
-	return func(w http.ResponseWriter, r *http.Request, _ accounts.Session) {
-		channels, err := svc.ListChannels(r.Context())
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
+		channels, err := svc.ListChannels(r.Context(), s.User)
 		if err != nil {
 			writeServiceError(w, logger, "list channels", err)
 			return
@@ -87,8 +96,23 @@ func handleListChannels(svc Chat, logger *slog.Logger) authedHandler {
 
 type channelRequest struct {
 	// Pointers tell "not sent" (nil) apart from "sent as empty" (""), so PATCH can update one field.
-	Name  *string `json:"name"`
-	Topic *string `json:"topic"`
+	Name     *string `json:"name"`
+	Topic    *string `json:"topic"`
+	ViewRole *string `json:"view_role"`
+	SendRole *string `json:"send_role"`
+}
+
+func (req channelRequest) changes() chat.ChannelChanges {
+	ch := chat.ChannelChanges{Name: req.Name, Topic: req.Topic}
+	if req.ViewRole != nil {
+		r := perm.Role(*req.ViewRole)
+		ch.ViewRole = &r
+	}
+	if req.SendRole != nil {
+		r := perm.Role(*req.SendRole)
+		ch.SendRole = &r
+	}
+	return ch
 }
 
 func handleCreateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
@@ -98,20 +122,28 @@ func handleCreateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		var name, topic string
-		if req.Name != nil {
-			name = *req.Name
+		ch := req.changes()
+		var set chat.ChannelSettings
+		if ch.Name != nil {
+			set.Name = *ch.Name
 		}
-		if req.Topic != nil {
-			topic = *req.Topic
+		if ch.Topic != nil {
+			set.Topic = *ch.Topic
 		}
-		c, err := svc.CreateChannel(r.Context(), s.User, name, topic)
+		if ch.ViewRole != nil {
+			set.ViewRole = *ch.ViewRole
+		}
+		if ch.SendRole != nil {
+			set.SendRole = *ch.SendRole
+		}
+		c, err := svc.CreateChannel(r.Context(), s.User, set)
 		if err != nil {
 			writeServiceError(w, logger, "create channel", err)
 			return
 		}
 		logger.Info("channel created", "channel_id", c.ID, "by_user_id", s.User.ID)
-		rt.Broadcast("channel.created", toChannelResponse(c))
+		// Only people who may see the new channel learn that it exists.
+		rt.BroadcastWhere("channel.created", toChannelResponse(c), c.CanView)
 		writeJSON(w, http.StatusCreated, struct {
 			Channel channelResponse `json:"channel"`
 		}{toChannelResponse(c)})
@@ -130,13 +162,17 @@ func handleUpdateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
 			return
 		}
-		c, err := svc.UpdateChannel(r.Context(), s.User, id, req.Name, req.Topic)
+		c, previousView, err := svc.UpdateChannel(r.Context(), s.User, id, req.changes())
 		if err != nil {
 			writeServiceError(w, logger, "update channel", err)
 			return
 		}
 		logger.Info("channel updated", "channel_id", c.ID, "by_user_id", s.User.ID)
-		rt.Broadcast("channel.updated", toChannelResponse(c))
+		rt.BroadcastWhere("channel.updated", toChannelResponse(c), c.CanView)
+		// Users who could see it before but not any more: for them it is gone.
+		rt.BroadcastWhere("channel.deleted", map[string]int64{"id": c.ID}, func(role perm.Role) bool {
+			return role.AtLeast(previousView) && !c.CanView(role)
+		})
 		writeJSON(w, http.StatusOK, struct {
 			Channel channelResponse `json:"channel"`
 		}{toChannelResponse(c)})
@@ -150,19 +186,20 @@ func handleDeleteChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 			writeError(w, http.StatusNotFound, "not_found", chat.ErrChannelNotFound.Error())
 			return
 		}
-		if err := svc.DeleteChannel(r.Context(), s.User, id); err != nil {
+		c, err := svc.DeleteChannel(r.Context(), s.User, id)
+		if err != nil {
 			writeServiceError(w, logger, "delete channel", err)
 			return
 		}
 		logger.Info("channel deleted", "channel_id", id, "by_user_id", s.User.ID)
-		rt.Broadcast("channel.deleted", map[string]int64{"id": id})
+		rt.BroadcastWhere("channel.deleted", map[string]int64{"id": id}, c.CanView)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
 
 func handleListMessages(svc Chat, logger *slog.Logger) authedHandler {
-	return func(w http.ResponseWriter, r *http.Request, _ accounts.Session) {
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
 			writeError(w, http.StatusNotFound, "not_found", chat.ErrChannelNotFound.Error())
@@ -181,7 +218,7 @@ func handleListMessages(svc Chat, logger *slog.Logger) authedHandler {
 			return
 		}
 
-		msgs, hasMore, err := svc.ListMessages(r.Context(), id, before, int(limit))
+		msgs, hasMore, err := svc.ListMessages(r.Context(), s.User, id, before, int(limit))
 		if err != nil {
 			writeServiceError(w, logger, "list messages", err)
 			return
@@ -212,13 +249,14 @@ func handleSendMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler
 			return
 		}
 		// Message text is never logged: it is private conversation.
-		m, err := svc.SendMessage(r.Context(), s.User, id, req.Content)
+		m, ch, err := svc.SendMessage(r.Context(), s.User, id, req.Content)
 		if err != nil {
 			writeServiceError(w, logger, "send message", err)
 			return
 		}
 		resp := toMessageResponse(m)
-		rt.Broadcast("message.created", resp) // to everyone, the sender's other devices too
+		// To everyone who may see the channel (the sender's other devices too).
+		rt.BroadcastWhere("message.created", resp, ch.CanView)
 		writeJSON(w, http.StatusCreated, struct {
 			Message messageResponse `json:"message"`
 		}{resp})
@@ -241,4 +279,24 @@ func optionalInt(s string, lo, hi int64) (int64, error) {
 		return 0, strconv.ErrRange
 	}
 	return n, nil
+}
+
+func handleDeleteMessage(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
+	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
+		channelID, ok1 := pathID(r, "id")
+		messageID, ok2 := pathID(r, "mid")
+		if !ok1 || !ok2 {
+			writeError(w, http.StatusNotFound, "not_found", chat.ErrMessageNotFound.Error())
+			return
+		}
+		ch, err := svc.DeleteMessage(r.Context(), s.User, channelID, messageID)
+		if err != nil {
+			writeServiceError(w, logger, "delete message", err)
+			return
+		}
+		logger.Info("message deleted", "message_id", messageID, "channel_id", channelID, "by_user_id", s.User.ID)
+		rt.BroadcastWhere("message.deleted", map[string]int64{"id": messageID, "channel_id": channelID}, ch.CanView)
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

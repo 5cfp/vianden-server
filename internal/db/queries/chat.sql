@@ -1,7 +1,7 @@
 -- name: ListChannels :many
 -- All channels in room-list order, each with its newest message (if any) for the preview.
 SELECT
-    c.id, c.name, c.topic, c.type, c.position,
+    c.id, c.name, c.topic, c.type, c.position, c.view_role, c.send_role,
     -- sqlc cannot tell that a LATERAL join may find nothing, so make "no message" explicit.
     (lm.created_at IS NOT NULL)::boolean        AS has_last_message,
     COALESCE(lm.content, '')::text            AS last_content,
@@ -12,6 +12,7 @@ LEFT JOIN LATERAL (
     SELECT m.content, m.created_at, m.author_id
     FROM messages m
     WHERE m.channel_id = c.id
+      AND m.deleted_at IS NULL -- the preview shows the newest message that still has text
     ORDER BY m.id DESC
     LIMIT 1
 ) lm ON true
@@ -20,12 +21,12 @@ ORDER BY c.position, c.id;
 
 -- name: CreateChannel :one
 -- New channels go to the end of the list.
-INSERT INTO channels (name, topic, position)
-VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
+INSERT INTO channels (name, topic, view_role, send_role, position)
+VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
 RETURNING *;
 
 -- name: UpdateChannel :one
-UPDATE channels SET name = $2, topic = $3 WHERE id = $1
+UPDATE channels SET name = $2, topic = $3, view_role = $4, send_role = $5 WHERE id = $1
 RETURNING *;
 
 -- name: GetChannel :one
@@ -43,7 +44,7 @@ RETURNING id, channel_id, content, created_at;
 -- One page of history, NEWEST first. "before" is the id of the oldest message the
 -- client already has (NULL for the newest page). Keyset pagination: see docs.
 SELECT
-    m.id, m.channel_id, m.content, m.created_at, m.author_id,
+    m.id, m.channel_id, m.content, m.created_at, m.author_id, (m.deleted_at IS NOT NULL)::boolean AS deleted,
     u.username     AS author_username,
     u.display_name AS author_display_name
 FROM messages m
@@ -52,3 +53,15 @@ WHERE m.channel_id = sqlc.arg(channel_id)
   AND (sqlc.narg(before)::bigint IS NULL OR m.id < sqlc.narg(before)::bigint)
 ORDER BY m.id DESC
 LIMIT sqlc.arg(row_limit);
+
+-- name: GetMessageWithAuthor :one
+-- A live (not deleted) message in a channel, with its author's role (for the hierarchy rule).
+SELECT m.id, m.channel_id, m.author_id, u.role AS author_role
+FROM messages m
+LEFT JOIN users u ON u.id = m.author_id
+WHERE m.id = $1 AND m.channel_id = $2 AND m.deleted_at IS NULL;
+
+-- name: DeleteMessage :execrows
+-- Erases the text for real (not just hidden) and keeps a placeholder row.
+UPDATE messages SET content = '', deleted_at = now(), deleted_by = $2
+WHERE id = $1 AND deleted_at IS NULL;

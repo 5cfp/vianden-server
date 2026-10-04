@@ -15,6 +15,7 @@ import (
 
 	"github.com/5cfp/vianden-server/internal/accounts"
 	"github.com/5cfp/vianden-server/internal/buildinfo"
+	"github.com/5cfp/vianden-server/internal/perm"
 )
 
 // Pinger is anything that can check the database connection.
@@ -31,6 +32,12 @@ type Accounts interface {
 	Authenticate(ctx context.Context, token string) (accounts.Session, error)
 	Logout(ctx context.Context, sessionID int64) error
 
+	ListMembers(ctx context.Context) ([]accounts.Member, error)
+	SetRole(ctx context.Context, by accounts.User, targetID int64, role perm.Role) (accounts.Member, error)
+	Kick(ctx context.Context, by accounts.User, targetID int64) error
+	Ban(ctx context.Context, by accounts.User, targetID int64, reason string) error
+	Unban(ctx context.Context, by accounts.User, targetID int64) error
+
 	CreateInvite(ctx context.Context, by accounts.User, maxUses, expiresInHours int) (accounts.Invite, string, error)
 	ListInvites(ctx context.Context, by accounts.User) ([]accounts.Invite, error)
 	DeleteInvite(ctx context.Context, by accounts.User, id int64) error
@@ -41,7 +48,11 @@ type Accounts interface {
 type Realtime interface {
 	Serve(w http.ResponseWriter, r *http.Request, s accounts.Session)
 	Broadcast(eventType string, data any)
+	// BroadcastWhere sends only to connections whose user role passes `to` (private channels).
+	BroadcastWhere(eventType string, data any, to func(perm.Role) bool)
 	EndSession(sessionID int64)
+	EndUser(userID int64)
+	UpdateUserRole(userID int64, role perm.Role)
 }
 
 // Deps are the things the API handlers depend on.
@@ -84,6 +95,14 @@ func NewHandler(d Deps) http.Handler {
 	// Sending: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
 	sendLimit := newIPRateLimiter(60, 10)
 	mux.HandleFunc("POST /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleSendMessage(d.Chat, d.Realtime, d.Logger))))
+	mux.HandleFunc("DELETE /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, handleDeleteMessage(d.Chat, d.Realtime, d.Logger)))
+
+	// Members: list (any logged-in user), role changes, kick, ban (checked in the service).
+	mux.HandleFunc("GET /api/v1/users", requireAuth(d.Accounts, d.Logger, handleListMembers(d.Accounts, d.Logger)))
+	mux.HandleFunc("PATCH /api/v1/users/{id}", requireAuth(d.Accounts, d.Logger, handleSetRole(d.Accounts, d.Realtime, d.Logger)))
+	mux.HandleFunc("POST /api/v1/users/{id}/kick", requireAuth(d.Accounts, d.Logger, handleKick(d.Accounts, d.Realtime, d.Logger)))
+	mux.HandleFunc("POST /api/v1/users/{id}/ban", requireAuth(d.Accounts, d.Logger, handleBan(d.Accounts, d.Realtime, d.Logger)))
+	mux.HandleFunc("DELETE /api/v1/users/{id}/ban", requireAuth(d.Accounts, d.Logger, handleUnban(d.Accounts, d.Logger)))
 
 	// Live events (WebSocket). Login is checked BEFORE the upgrade, with the normal Bearer header.
 	mux.HandleFunc("GET /api/v1/ws", requireAuth(d.Accounts, d.Logger, d.Realtime.Serve))
@@ -210,8 +229,11 @@ type noRealtime struct{}
 func (noRealtime) Serve(w http.ResponseWriter, _ *http.Request, _ accounts.Session) {
 	writeError(w, http.StatusNotFound, "not_found", "route not found")
 }
-func (noRealtime) Broadcast(string, any) {}
-func (noRealtime) EndSession(int64)      {}
+func (noRealtime) Broadcast(string, any)                            {}
+func (noRealtime) BroadcastWhere(string, any, func(perm.Role) bool) {}
+func (noRealtime) EndSession(int64)                                 {}
+func (noRealtime) EndUser(int64)                                    {}
+func (noRealtime) UpdateUserRole(int64, perm.Role)                  {}
 
 // jsonErrorMessage turns a JSON decoding error into a message for the client. Go's own
 // messages mention internal type names (e.g. "Go struct field registerRequest.username"),

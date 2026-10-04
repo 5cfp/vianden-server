@@ -11,19 +11,26 @@ import (
 )
 
 const createChannel = `-- name: CreateChannel :one
-INSERT INTO channels (name, topic, position)
-VALUES ($1, $2, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
-RETURNING id, name, topic, type, position, created_at
+INSERT INTO channels (name, topic, view_role, send_role, position)
+VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
+RETURNING id, name, topic, type, position, created_at, view_role, send_role
 `
 
 type CreateChannelParams struct {
-	Name  string
-	Topic string
+	Name     string
+	Topic    string
+	ViewRole string
+	SendRole string
 }
 
 // New channels go to the end of the list.
 func (q *Queries) CreateChannel(ctx context.Context, arg CreateChannelParams) (Channel, error) {
-	row := q.db.QueryRow(ctx, createChannel, arg.Name, arg.Topic)
+	row := q.db.QueryRow(ctx, createChannel,
+		arg.Name,
+		arg.Topic,
+		arg.ViewRole,
+		arg.SendRole,
+	)
 	var i Channel
 	err := row.Scan(
 		&i.ID,
@@ -32,6 +39,8 @@ func (q *Queries) CreateChannel(ctx context.Context, arg CreateChannelParams) (C
 		&i.Type,
 		&i.Position,
 		&i.CreatedAt,
+		&i.ViewRole,
+		&i.SendRole,
 	)
 	return i, err
 }
@@ -79,8 +88,27 @@ func (q *Queries) DeleteChannel(ctx context.Context, id int64) (int64, error) {
 	return result.RowsAffected(), nil
 }
 
+const deleteMessage = `-- name: DeleteMessage :execrows
+UPDATE messages SET content = '', deleted_at = now(), deleted_by = $2
+WHERE id = $1 AND deleted_at IS NULL
+`
+
+type DeleteMessageParams struct {
+	ID        int64
+	DeletedBy *int64
+}
+
+// Erases the text for real (not just hidden) and keeps a placeholder row.
+func (q *Queries) DeleteMessage(ctx context.Context, arg DeleteMessageParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteMessage, arg.ID, arg.DeletedBy)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getChannel = `-- name: GetChannel :one
-SELECT id, name, topic, type, position, created_at FROM channels WHERE id = $1
+SELECT id, name, topic, type, position, created_at, view_role, send_role FROM channels WHERE id = $1
 `
 
 func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
@@ -93,13 +121,47 @@ func (q *Queries) GetChannel(ctx context.Context, id int64) (Channel, error) {
 		&i.Type,
 		&i.Position,
 		&i.CreatedAt,
+		&i.ViewRole,
+		&i.SendRole,
+	)
+	return i, err
+}
+
+const getMessageWithAuthor = `-- name: GetMessageWithAuthor :one
+SELECT m.id, m.channel_id, m.author_id, u.role AS author_role
+FROM messages m
+LEFT JOIN users u ON u.id = m.author_id
+WHERE m.id = $1 AND m.channel_id = $2 AND m.deleted_at IS NULL
+`
+
+type GetMessageWithAuthorParams struct {
+	ID        int64
+	ChannelID int64
+}
+
+type GetMessageWithAuthorRow struct {
+	ID         int64
+	ChannelID  int64
+	AuthorID   *int64
+	AuthorRole *string
+}
+
+// A live (not deleted) message in a channel, with its author's role (for the hierarchy rule).
+func (q *Queries) GetMessageWithAuthor(ctx context.Context, arg GetMessageWithAuthorParams) (GetMessageWithAuthorRow, error) {
+	row := q.db.QueryRow(ctx, getMessageWithAuthor, arg.ID, arg.ChannelID)
+	var i GetMessageWithAuthorRow
+	err := row.Scan(
+		&i.ID,
+		&i.ChannelID,
+		&i.AuthorID,
+		&i.AuthorRole,
 	)
 	return i, err
 }
 
 const listChannels = `-- name: ListChannels :many
 SELECT
-    c.id, c.name, c.topic, c.type, c.position,
+    c.id, c.name, c.topic, c.type, c.position, c.view_role, c.send_role,
     -- sqlc cannot tell that a LATERAL join may find nothing, so make "no message" explicit.
     (lm.created_at IS NOT NULL)::boolean        AS has_last_message,
     COALESCE(lm.content, '')::text            AS last_content,
@@ -110,6 +172,7 @@ LEFT JOIN LATERAL (
     SELECT m.content, m.created_at, m.author_id
     FROM messages m
     WHERE m.channel_id = c.id
+      AND m.deleted_at IS NULL -- the preview shows the newest message that still has text
     ORDER BY m.id DESC
     LIMIT 1
 ) lm ON true
@@ -123,6 +186,8 @@ type ListChannelsRow struct {
 	Topic          string
 	Type           string
 	Position       int32
+	ViewRole       string
+	SendRole       string
 	HasLastMessage bool
 	LastContent    string
 	LastCreatedAt  time.Time
@@ -145,6 +210,8 @@ func (q *Queries) ListChannels(ctx context.Context) ([]ListChannelsRow, error) {
 			&i.Topic,
 			&i.Type,
 			&i.Position,
+			&i.ViewRole,
+			&i.SendRole,
 			&i.HasLastMessage,
 			&i.LastContent,
 			&i.LastCreatedAt,
@@ -162,7 +229,7 @@ func (q *Queries) ListChannels(ctx context.Context) ([]ListChannelsRow, error) {
 
 const listMessages = `-- name: ListMessages :many
 SELECT
-    m.id, m.channel_id, m.content, m.created_at, m.author_id,
+    m.id, m.channel_id, m.content, m.created_at, m.author_id, (m.deleted_at IS NOT NULL)::boolean AS deleted,
     u.username     AS author_username,
     u.display_name AS author_display_name
 FROM messages m
@@ -185,6 +252,7 @@ type ListMessagesRow struct {
 	Content           string
 	CreatedAt         time.Time
 	AuthorID          *int64
+	Deleted           bool
 	AuthorUsername    *string
 	AuthorDisplayName *string
 }
@@ -206,6 +274,7 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 			&i.Content,
 			&i.CreatedAt,
 			&i.AuthorID,
+			&i.Deleted,
 			&i.AuthorUsername,
 			&i.AuthorDisplayName,
 		); err != nil {
@@ -220,18 +289,26 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]L
 }
 
 const updateChannel = `-- name: UpdateChannel :one
-UPDATE channels SET name = $2, topic = $3 WHERE id = $1
-RETURNING id, name, topic, type, position, created_at
+UPDATE channels SET name = $2, topic = $3, view_role = $4, send_role = $5 WHERE id = $1
+RETURNING id, name, topic, type, position, created_at, view_role, send_role
 `
 
 type UpdateChannelParams struct {
-	ID    int64
-	Name  string
-	Topic string
+	ID       int64
+	Name     string
+	Topic    string
+	ViewRole string
+	SendRole string
 }
 
 func (q *Queries) UpdateChannel(ctx context.Context, arg UpdateChannelParams) (Channel, error) {
-	row := q.db.QueryRow(ctx, updateChannel, arg.ID, arg.Name, arg.Topic)
+	row := q.db.QueryRow(ctx, updateChannel,
+		arg.ID,
+		arg.Name,
+		arg.Topic,
+		arg.ViewRole,
+		arg.SendRole,
+	)
 	var i Channel
 	err := row.Scan(
 		&i.ID,
@@ -240,6 +317,8 @@ func (q *Queries) UpdateChannel(ctx context.Context, arg UpdateChannelParams) (C
 		&i.Type,
 		&i.Position,
 		&i.CreatedAt,
+		&i.ViewRole,
+		&i.SendRole,
 	)
 	return i, err
 }
