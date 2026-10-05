@@ -16,12 +16,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-ARG VERSION=dev
+# VERSION (optional) overrides the version written in internal/buildinfo.
+ARG VERSION=
 # CGO_ENABLED=0: a fully static program that needs no system libraries (required for "scratch").
 # -trimpath: no local folder names in the binary. -s -w: smaller binary (no debug symbols).
-RUN CGO_ENABLED=0 go build -trimpath \
-      -ldflags "-s -w -X github.com/5cfp/vianden-server/internal/buildinfo.Version=${VERSION}" \
-      -o /out/vianden-server ./cmd/server
+RUN set -e; \
+    LDFLAGS="-s -w"; \
+    if [ -n "$VERSION" ]; then LDFLAGS="$LDFLAGS -X github.com/5cfp/vianden-server/internal/buildinfo.Version=$VERSION"; fi; \
+    CGO_ENABLED=0 go build -trimpath -ldflags "$LDFLAGS" -o /out/vianden-server ./cmd/server
 
 # Third-party license notices (MIT/BSD/Apache require shipping them with the program),
 # plus the Go standard library's license (it is compiled into the program too).

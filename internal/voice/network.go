@@ -37,7 +37,10 @@ func (s *Service) newAPI(publicIPs []string) (*webrtc.API, error) {
 	if err := m.RegisterCodec(webrtc.RTPCodecParameters{
 		RTPCodecCapability: webrtc.RTPCodecCapability{
 			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
+			// maxaveragebitrate: what each app may send. WebRTC's own default for voice
+			// is 32 kbit/s; 64 kbit/s is near-transparent speech (still tiny: 25 people
+			// in a channel stay far below 2 Mbit/s per listener).
+			SDPFmtpLine: "minptime=10;useinbandfec=1;maxaveragebitrate=64000",
 		},
 		PayloadType: 111,
 	}, webrtc.RTPCodecTypeAudio); err != nil {

@@ -10,7 +10,8 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The version written in the code (internal/buildinfo), so file names and the server agree.
+version=$(sed -n 's/^var Version = "\(.*\)"/\1/p' internal/buildinfo/buildinfo.go)
 out=dist
 rm -rf "$out"
 mkdir -p "$out"
@@ -31,7 +32,7 @@ for target in linux/amd64 linux/arm64 windows/amd64; do
 
   echo "Building $name..."
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath \
-    -ldflags "-s -w -X github.com/5cfp/vianden-server/internal/buildinfo.Version=$version" \
+    -ldflags "-s -w" \
     -o "$dir/vianden-server$ext" ./cmd/server
 
   cp LICENSE .env.example "$dir/"

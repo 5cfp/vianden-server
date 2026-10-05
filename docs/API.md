@@ -59,6 +59,8 @@ Pins apply to both the REST API and the WebSocket.
 ### Version handshake
 Before anything else, a client calls [`GET /api/v1/info`](#get-apiv1info) and compares `protocol_version` with the version it was built for. If they differ, the client should not continue and should show the user a clear message (for example, "This server needs a newer version of the app").
 
+The official app also compares `version` (semantic versioning, e.g. `0.3.0-alpha.3`): app and server must have the **same MAJOR number** (the first one), or the app shows "Version mismatch" and says which side to update. App and server releases share their version numbers. A `version` that is not `MAJOR.MINOR.PATCH...` (e.g. `dev` from a developer build) is not checked.
+
 ---
 
 ## 2. Standard error format
@@ -206,7 +208,7 @@ Returns the server's name and versions. Used for the [version handshake](#versio
 ```json
 {
   "name": "My Vianden Server",
-  "version": "0.1.0-dev",
+  "version": "0.3.0-alpha.3",
   "protocol_version": 1,
   "voice": true
 }
@@ -215,7 +217,7 @@ Returns the server's name and versions. Used for the [version handshake](#versio
 | Field | Type | Meaning |
 |---|---|---|
 | `name` | string | Server name chosen by the host (at most 64 characters). |
-| `version` | string | Server software version. For display only; do not use it for compatibility checks. |
+| `version` | string | Server software version (semantic versioning). Same as the matching app release; apps compare the MAJOR number (see [Version handshake](#version-handshake)). |
 | `protocol_version` | integer | API protocol version. Compare this for compatibility. |
 | `voice` | boolean | Whether voice channels work on this server (see [Voice signaling](#6-voice-signaling)). If `false`, show voice channels as unavailable. |
 
@@ -813,7 +815,7 @@ Unknown or malformed client messages are ignored.
 
 Voice channels (`type: "voice"`) carry live audio, nothing else (no messages). The server is an **audio-only SFU**: each client opens **one WebRTC connection** to the server, sends its own microphone once, and receives the other people's audio as separate tracks. The server forwards packets without decoding or mixing them.
 
-- **Codec:** Opus, 48 kHz (the WebRTC default). The server offers nothing else.
+- **Codec:** Opus, 48 kHz (the WebRTC default). The server offers nothing else. Its offers carry `maxaveragebitrate=64000`: clients may send up to 64 kbit/s (WebRTC's own default is 32), and should honor it.
 - **Encryption:** always on (WebRTC's DTLS-SRTP). The keys are agreed inside the signaling below, which runs over the TLS WebSocket. Note: this is client-to-server encryption, like everything else; the server could technically listen in (see "Security" in HOSTING.md).
 - **Network:** the server's addresses come as ICE candidates: one **UDP port** (default 50000), and a **TCP** fallback on the server's main port (443) for networks that block UDP. Clients need no STUN or TURN servers: use an empty ICE server list.
 - **Who may do what:** you may **join and listen** in a voice channel you can see (`view_role`), and **speak** if your role reaches its `send_role`. Audio of people who may not speak, or who are server-muted, is **dropped by the server**. Joining a voice channel you cannot see answers `voice.error` `not_found`.
@@ -936,3 +938,5 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added attachments: `POST /api/v1/attachments`, `GET /api/v1/attachments/{id}`, `attachments` in the send request and in message objects, errors `invalid_attachments`, `invalid_filename`, `invalid_file`, `file_too_large`, `too_many_uploads`. A message with attachments may have empty `content`.
 - Added profiles: `PATCH /api/v1/me` (display name), `PUT`/`DELETE /api/v1/me/avatar`, `GET /api/v1/avatars/{key}`, `avatar` in user and member objects; `member.updated` is now also sent when a display name or avatar changes. New error `invalid_avatar`.
 - Added voice channels: `type: "voice"` (create only; `invalid_type` when changing it), [voice signaling](#6-voice-signaling) over the WebSocket (`voice.join`, `voice.leave`, `voice.answer`, `voice.candidate`, `voice.self`, `voice.speaking`; `voice.joined`, `voice.offer`, `voice.candidate`, `voice.left`, `voice.error`, `voice.state`, `voice.speaking`), `GET /api/v1/voice`, voice moderation (`POST .../voice/{user_id}/disconnect`, `PUT .../voice/{user_id}/mute`, permission `moderate_voice`), `voice` in `GET /api/v1/info`. Message endpoints answer `not_a_text_channel` for voice channels. WebSocket client messages may now be up to 32 KiB, 20 per second (bursts of 60).
+- Voice offers now carry `maxaveragebitrate=64000` (Opus up to 64 kbit/s; WebRTC's default was 32).
+- Server version is now `0.3.0-alpha.3` (shared with the app); the official app refuses servers with a different MAJOR version.

@@ -30,7 +30,7 @@ services:
     build:
       context: ..
       args:
-        VERSION: ${VIANDEN_VERSION:-dev}
+        VERSION: ${VIANDEN_VERSION:-} # empty = the version in the code
     image: vianden-server:local
     restart: unless-stopped
     depends_on:
