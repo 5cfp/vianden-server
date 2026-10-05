@@ -30,16 +30,17 @@ const (
 	KickMembers     Permission = "kick_members"     // sign a user out everywhere
 	BanMembers      Permission = "ban_members"      // block a user from logging in (and unban)
 	MentionEveryone Permission = "mention_everyone" // @everyone pings everyone who can see the channel (M6)
+	ModerateVoice   Permission = "moderate_voice"   // disconnect or server-mute someone in voice (M7)
 )
 
 // AllPermissions lists every permission (used for the owner).
-var AllPermissions = []Permission{ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone}
+var AllPermissions = []Permission{ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone, ModerateVoice}
 
 // rolePermissions: what each role may do (decided in PROJECT_PLAN.md, M5).
 var rolePermissions = map[Role][]Permission{
 	Owner:     AllPermissions,
-	Admin:     {ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone},
-	Moderator: {DeleteMessages, KickMembers, MentionEveryone},
+	Admin:     {ManageChannels, ManageInvites, ManageRoles, DeleteMessages, KickMembers, BanMembers, MentionEveryone, ModerateVoice},
+	Moderator: {DeleteMessages, KickMembers, MentionEveryone, ModerateVoice},
 	Member:    {},
 }
 

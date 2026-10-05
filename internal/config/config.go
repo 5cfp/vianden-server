@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -53,8 +54,19 @@ type Config struct {
 	Domain string
 	// ACMEEmail is optional: Let's Encrypt uses it to warn about certificate problems.
 	ACMEEmail string
-	// DataDir holds files the server creates: certificates (and later, uploads).
+	// DataDir holds files the server creates: certificates, uploads, avatars.
 	DataDir string
+
+	// Voice (M7). VoiceUDPPort is the one UDP port for all voice audio (0 = voice off).
+	VoiceUDPPort int
+	// VoicePublicAddresses are the IPs or host names clients use to reach voice: the
+	// public IP behind a router, optionally also the LAN IP (for people at home). Host
+	// names are looked up again regularly (dynamic home IPs). Empty = the machine's own
+	// addresses (fine on a LAN or a VPS with a public IP on its network card).
+	VoicePublicAddresses []string
+	// VoiceTCPPort is the PUBLIC port of the voice TCP fallback, which shares the main
+	// HTTP(S) port. Docker maps 443 -> 8443, so there it must be set to 443.
+	VoiceTCPPort int
 }
 
 // Load reads the configuration. A missing .env file is fine; an unreadable one is an error.
@@ -84,6 +96,9 @@ func fromEnv(getenv func(string) string) (Config, error) {
 		Domain:      strings.ToLower(get("VIANDEN_DOMAIN", "")),
 		ACMEEmail:   get("VIANDEN_ACME_EMAIL", ""),
 		DataDir:     get("VIANDEN_DATA_DIR", "./data"),
+	}
+	if err := voiceFromEnv(&cfg, get); err != nil {
+		return Config{}, err
 	}
 
 	// No default on purpose: a default would mean a default password.
@@ -131,4 +146,39 @@ func validHostname(s string) bool {
 		}
 	}
 	return true
+}
+
+// voiceFromEnv reads the voice settings (M7).
+func voiceFromEnv(cfg *Config, get func(key, fallback string) string) error {
+	port, err := strconv.Atoi(get("VIANDEN_VOICE_UDP_PORT", "50000"))
+	if err != nil || port < 0 || port > 65535 {
+		return errors.New("VIANDEN_VOICE_UDP_PORT must be a port number (0 turns voice off)")
+	}
+	cfg.VoiceUDPPort = port
+
+	// Default: the domain, if there is one (its DNS name points at the public IP).
+	addrs := get("VIANDEN_VOICE_PUBLIC_ADDRESS", cfg.Domain)
+	for _, a := range strings.Split(addrs, ",") {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a == "" {
+			continue
+		}
+		if !validHostname(a) {
+			return fmt.Errorf("VIANDEN_VOICE_PUBLIC_ADDRESS: %q is not an IP address or host name", a)
+		}
+		cfg.VoicePublicAddresses = append(cfg.VoicePublicAddresses, a)
+	}
+
+	// The TCP fallback shares the main port; by default its public port is that port.
+	main := cfg.ListenAddr
+	if cfg.TLSMode != TLSPlain {
+		main = cfg.HTTPSAddr
+	}
+	_, mainPort, _ := net.SplitHostPort(main)
+	tcp, err := strconv.Atoi(get("VIANDEN_VOICE_TCP_PORT", mainPort))
+	if err != nil || tcp < 1 || tcp > 65535 {
+		return errors.New("VIANDEN_VOICE_TCP_PORT must be a port number")
+	}
+	cfg.VoiceTCPPort = tcp
+	return nil
 }

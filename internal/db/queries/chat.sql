@@ -21,8 +21,8 @@ ORDER BY c.position, c.id;
 
 -- name: CreateChannel :one
 -- New channels go to the end of the list.
-INSERT INTO channels (name, topic, view_role, send_role, position)
-VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
+INSERT INTO channels (name, topic, view_role, send_role, type, position)
+VALUES ($1, $2, $3, $4, $5, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
 RETURNING *;
 
 -- name: UpdateChannel :one

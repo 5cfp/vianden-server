@@ -68,3 +68,43 @@ func TestRequiredDatabaseURL(t *testing.T) {
 		t.Error("missing database URL accepted")
 	}
 }
+
+func TestVoiceSettings(t *testing.T) {
+	base := map[string]string{"VIANDEN_DATABASE_URL": "postgres://x"}
+	cfg, _ := fromEnv(env(base))
+	if cfg.VoiceUDPPort != 50000 || len(cfg.VoicePublicAddresses) != 0 || cfg.VoiceTCPPort != 8080 {
+		t.Errorf("plain defaults: udp %d, addrs %v, tcp %d", cfg.VoiceUDPPort, cfg.VoicePublicAddresses, cfg.VoiceTCPPort)
+	}
+
+	// With a domain, voice advertises the domain; the TCP fallback uses the HTTPS port.
+	tls := map[string]string{"VIANDEN_DATABASE_URL": "postgres://x", "VIANDEN_TLS_MODE": "autocert", "VIANDEN_DOMAIN": "chat.example.com"}
+	cfg, _ = fromEnv(env(tls))
+	if len(cfg.VoicePublicAddresses) != 1 || cfg.VoicePublicAddresses[0] != "chat.example.com" || cfg.VoiceTCPPort != 443 {
+		t.Errorf("autocert defaults: %v, tcp %d", cfg.VoicePublicAddresses, cfg.VoiceTCPPort)
+	}
+
+	// Public + LAN address, a custom port, Docker's public TCP port.
+	tls["VIANDEN_VOICE_PUBLIC_ADDRESS"] = " chat.example.com , 192.168.1.20 "
+	tls["VIANDEN_VOICE_UDP_PORT"] = "40000"
+	tls["VIANDEN_HTTPS_ADDR"] = ":8443"
+	tls["VIANDEN_VOICE_TCP_PORT"] = "443"
+	cfg, err := fromEnv(env(tls))
+	if err != nil || len(cfg.VoicePublicAddresses) != 2 || cfg.VoicePublicAddresses[1] != "192.168.1.20" || cfg.VoiceUDPPort != 40000 || cfg.VoiceTCPPort != 443 {
+		t.Errorf("custom: %+v, %v", cfg, err)
+	}
+
+	for k, v := range map[string]string{
+		"VIANDEN_VOICE_UDP_PORT":       "70000",
+		"VIANDEN_VOICE_PUBLIC_ADDRESS": "bad host!",
+		"VIANDEN_VOICE_TCP_PORT":       "x",
+	} {
+		bad := map[string]string{"VIANDEN_DATABASE_URL": "postgres://x", k: v}
+		if _, err := fromEnv(env(bad)); err == nil {
+			t.Errorf("%s=%q accepted", k, v)
+		}
+	}
+	off := map[string]string{"VIANDEN_DATABASE_URL": "postgres://x", "VIANDEN_VOICE_UDP_PORT": "0"}
+	if cfg, err := fromEnv(env(off)); err != nil || cfg.VoiceUDPPort != 0 {
+		t.Errorf("voice off: %v, %v", cfg.VoiceUDPPort, err)
+	}
+}

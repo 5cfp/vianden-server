@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/signal"
 	"sync"
@@ -27,6 +28,8 @@ import (
 	"github.com/5cfp/vianden-server/internal/files"
 	"github.com/5cfp/vianden-server/internal/realtime"
 	"github.com/5cfp/vianden-server/internal/supervisor"
+	"github.com/5cfp/vianden-server/internal/tcpshare"
+	"github.com/5cfp/vianden-server/internal/voice"
 	"github.com/5cfp/vianden-server/internal/web"
 )
 
@@ -91,6 +94,16 @@ func run(logger *slog.Logger) error {
 	hub := realtime.NewHub(logger)
 	hub.SetChannelAccess(chatService.ChannelAccess) // typing only in channels the sender may see
 
+	// Voice (M7). If it cannot start (e.g. the UDP port is taken), the server runs without
+	// it: text chat must keep working.
+	voiceService, iceTCP := startVoice(ctx, cfg, chatService, hub, logger)
+	var voiceDep api.Voice
+	if voiceService != nil {
+		defer voiceService.Close()
+		hub.SetVoice(voiceService)
+		voiceDep = voiceService
+	}
+
 	handler := api.NewHandler(api.Deps{
 		ServerName: cfg.ServerName,
 		DB:         pool,
@@ -99,6 +112,7 @@ func run(logger *slog.Logger) error {
 		Files:      fileService,
 		Profiles:   accountService,
 		Avatars:    fileService,
+		Voice:      voiceDep,
 		Realtime:   hub,
 		Logger:     logger,
 	})
@@ -110,9 +124,14 @@ func run(logger *slog.Logger) error {
 		supervisor.Run(ctx, logger, "web", func(ctx context.Context) error {
 			// Shutdown does not wait for WebSocket connections (they are "hijacked" from the
 			// HTTP server), so hub.CloseAll closes them when shutting down.
-			return web.Serve(ctx, cfg, handler, hub.CloseAll, logger)
+			return web.Serve(ctx, cfg, handler, hub.CloseAll, iceTCP, logger)
 		})
 	})
+	if voiceService != nil {
+		wg.Go(func() {
+			supervisor.Run(ctx, logger, "voice", voiceService.Run)
+		})
+	}
 	wg.Go(func() {
 		supervisor.Run(ctx, logger, "cleanup", func(ctx context.Context) error {
 			return cleanupLoop(ctx, accountService, fileService, logger)
@@ -169,4 +188,29 @@ func printSetupToken(token string) {
 	fmt.Println("  It works once. Keep it secret: whoever uses it becomes the owner.")
 	fmt.Println("==================================================================")
 	fmt.Println()
+}
+
+// startVoice opens the voice UDP port and the TCP fallback (which shares the main port).
+// On failure it logs why and returns nils: the server then runs without voice.
+func startVoice(ctx context.Context, cfg config.Config, chatService *chat.Service, hub *realtime.Hub, logger *slog.Logger) (*voice.Service, *tcpshare.Queue) {
+	if cfg.VoiceUDPPort == 0 {
+		logger.Info("voice is turned off (VIANDEN_VOICE_UDP_PORT=0)")
+		return nil, nil
+	}
+	// The address is what voice tells clients for the TCP fallback: only its PORT is used
+	// (the IPs come from the public address setting).
+	iceTCP := tcpshare.NewQueue(&net.TCPAddr{Port: cfg.VoiceTCPPort})
+	lookup := func(ctx context.Context, id int64) (voice.ChannelRules, bool) {
+		c, ok := chatService.ChannelInfo(ctx, id)
+		return voice.ChannelRules{View: c.ViewRole, Send: c.SendRole, Voice: c.Type == chat.TypeVoice}, ok
+	}
+	svc, err := voice.New(ctx, voice.Config{
+		UDPPort: cfg.VoiceUDPPort, PublicAddresses: cfg.VoicePublicAddresses, TCP: iceTCP,
+	}, lookup, hub, logger)
+	if err != nil {
+		logger.Error("voice is NOT available; text chat works normally", "error", err)
+		iceTCP.Close()
+		return nil, nil
+	}
+	return svc, iceTCP
 }

@@ -904,3 +904,31 @@ func TestSendWithAttachments(t *testing.T) {
 		t.Errorf("file of a deleted message still downloadable: %v", err)
 	}
 }
+
+// ---- voice channels (M7) ----
+
+func TestVoiceChannelsHaveNoMessages(t *testing.T) {
+	s, _, owner, member := setup(t)
+	v, err := s.CreateChannel(ctx, owner, ChannelSettings{Name: "Lounge", Type: TypeVoice})
+	if err != nil || v.Type != TypeVoice {
+		t.Fatalf("create voice channel: %+v, %v", v, err)
+	}
+	if _, _, err := s.SendMessage(ctx, member, v.ID, "hi", 0, nil); !errors.Is(err, ErrNotTextChannel) {
+		t.Errorf("send into voice: %v", err)
+	}
+	if _, _, err := s.ListMessages(ctx, member, v.ID, 0, 50); !errors.Is(err, ErrNotTextChannel) {
+		t.Errorf("list voice messages: %v", err)
+	}
+	if _, err := s.MarkRead(ctx, member, v.ID, 1); !errors.Is(err, ErrNotTextChannel) {
+		t.Errorf("mark voice read: %v", err)
+	}
+	if _, err := s.CreateChannel(ctx, owner, ChannelSettings{Name: "x", Type: "video"}); validationField(err) != "type" {
+		t.Errorf("unknown type: %v", err)
+	}
+	if c, ok := s.ChannelInfo(ctx, v.ID); !ok || c.Type != TypeVoice {
+		t.Errorf("ChannelInfo: %+v %v", c, ok)
+	}
+	if list, _ := s.ListChannels(ctx, member); len(list) != 1 || list[0].Type != TypeVoice {
+		t.Errorf("list: %+v", list)
+	}
+}

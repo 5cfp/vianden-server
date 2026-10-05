@@ -27,8 +27,8 @@ func (q *Queries) AddMentions(ctx context.Context, arg AddMentionsParams) error 
 }
 
 const createChannel = `-- name: CreateChannel :one
-INSERT INTO channels (name, topic, view_role, send_role, position)
-VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
+INSERT INTO channels (name, topic, view_role, send_role, type, position)
+VALUES ($1, $2, $3, $4, $5, (SELECT COALESCE(MAX(position), -1) + 1 FROM channels))
 RETURNING id, name, topic, type, position, created_at, view_role, send_role
 `
 
@@ -37,6 +37,7 @@ type CreateChannelParams struct {
 	Topic    string
 	ViewRole string
 	SendRole string
+	Type     string
 }
 
 // New channels go to the end of the list.
@@ -46,6 +47,7 @@ func (q *Queries) CreateChannel(ctx context.Context, arg CreateChannelParams) (C
 		arg.Topic,
 		arg.ViewRole,
 		arg.SendRole,
+		arg.Type,
 	)
 	var i Channel
 	err := row.Scan(

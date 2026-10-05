@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,7 +245,7 @@ func TestLogoutClosesThatSessionOnly(t *testing.T) {
 func TestTooBigMessageClosesConnection(t *testing.T) {
 	_, url := testServer(t)
 	a, _ := dial(t, url, 1, 1)
-	a.send(`{"type":"typing","pad":"` + strings.Repeat("x", 5000) + `"}`)
+	a.send(`{"type":"typing","pad":"` + strings.Repeat("x", maxIncomingBytes+1) + `"}`)
 	if code := a.closeStatus(); code != websocket.StatusMessageTooBig {
 		t.Errorf("close code = %d, want %d (message too big)", code, websocket.StatusMessageTooBig)
 	}
@@ -491,5 +492,77 @@ func TestUpdateUserProfileRenamesInTheOnlineList(t *testing.T) {
 		if info["id"] == float64(7) && info["display_name"] != "Renamed" {
 			t.Errorf("online list shows %v", info["display_name"])
 		}
+	}
+}
+
+// fakeVoice records what the hub hands to the voice service.
+type fakeVoice struct {
+	mu    sync.Mutex
+	got   []string
+	gone  []int64
+	peers []Peer
+	panic bool
+}
+
+func (f *fakeVoice) HandleVoice(p Peer, t string, data json.RawMessage) {
+	f.mu.Lock()
+	f.got = append(f.got, t+" "+string(data))
+	f.peers = append(f.peers, p)
+	f.mu.Unlock()
+	if f.panic {
+		panic("voice bug")
+	}
+	p.Send("voice.echo", map[string]string{"got": t})
+}
+
+func (f *fakeVoice) PeerGone(p Peer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gone = append(f.gone, p.ConnID())
+}
+
+func TestVoiceMessagesGoToTheVoiceService(t *testing.T) {
+	hub, url := testServer(t)
+	v := &fakeVoice{}
+	hub.SetVoice(v)
+	a, _ := dial(t, url, 7, 1)
+
+	a.send(`{"type":"voice.join","data":{"channel_id":3}}`)
+	if e := a.next(); e.Type != "voice.echo" {
+		t.Fatalf("got %+v, want the voice service's reply on the same connection", e)
+	}
+	v.mu.Lock()
+	if len(v.got) != 1 || v.got[0] != `voice.join {"channel_id":3}` || v.peers[0].User().ID != 7 {
+		t.Errorf("voice got %v", v.got)
+	}
+	id := v.peers[0].ConnID()
+	v.mu.Unlock()
+
+	a.c.Close(websocket.StatusNormalClosure, "bye")
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		v.mu.Lock()
+		n := len(v.gone)
+		v.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if len(v.gone) != 1 || v.gone[0] != id {
+		t.Errorf("PeerGone calls %v, want [%d]", v.gone, id)
+	}
+}
+
+func TestAPanicInVoiceKeepsTheConnection(t *testing.T) {
+	hub, url := testServer(t)
+	hub.SetVoice(&fakeVoice{panic: true})
+	a, _ := dial(t, url, 7, 1)
+	a.send(`{"type":"voice.join","data":{}}`)
+	hub.Broadcast("still.here", nil)
+	if e := a.next(); e.Type != "still.here" {
+		t.Errorf("after a voice panic got %+v", e)
 	}
 }

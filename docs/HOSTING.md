@@ -88,10 +88,13 @@ In the router's "Port forwarding" (or "Virtual server" / "NAT") page, forward to
 |---|---|---|---|---|
 | 443 | TCP | 192.168.1.20 | 443 | HTTPS: the app and its live connection |
 | 80 | TCP | 192.168.1.20 | 80 | Let's Encrypt's domain check, and redirects to HTTPS |
+| 50000 | **UDP** | 192.168.1.20 | 50000 | Voice channels (all voice audio uses this one port) |
 
 Do **not** forward any other ports (especially not 5432, the database, or 22, SSH).
 
-> Voice channels (a later version) will need one extra UDP port. This guide will say so when it is time.
+Voice also works over TCP 443 for people whose network blocks UDP (schools, offices): nothing extra to forward for that. If you change the UDP port (`VIANDEN_VOICE_UDP_PORT` in `deploy/.env`), forward the new number instead.
+
+**Voice for people in your home:** the app is told your public address. Many routers cannot "loop back" from inside the home to their own public address. Then add your server's LAN IP in `deploy/.env`: `VIANDEN_VOICE_PUBLIC_ADDRESS=chat.example.com,192.168.1.20`. Apps at home use the LAN address, everyone else the public one.
 
 ### 5. Prepare Ubuntu
 ```bash
@@ -108,7 +111,7 @@ sudo usermod -aG docker $USER   # use docker without sudo; log out and in again 
 docker compose version          # should print a version
 ```
 
-**Firewall note.** If you use `ufw`: Docker's published ports (here 80 and 443) bypass `ufw` rules. That is fine for this setup, because only 80 and 443 are published on purpose and the database is not published at all. Keep SSH restricted, for example `sudo ufw allow from 192.168.1.0/24 to any port 22`.
+**Firewall note.** If you use `ufw`: Docker's published ports (here 80, 443 and UDP 50000) bypass `ufw` rules. That is fine for this setup, because only those are published on purpose and the database is not published at all. Keep SSH restricted, for example `sudo ufw allow from 192.168.1.0/24 to any port 22`.
 
 ### 6. Download and configure the server
 ```bash
@@ -222,6 +225,7 @@ Please read this, and tell your users the short version.
 
 **On the server (not end-to-end):**
 - The encryption is **between each app and the server**, not from one user to another. The server decrypts everything it receives. Messages are stored **unencrypted** in the database, and so are the backups.
+- **Voice is the same:** audio is encrypted between each app and the server (WebRTC's DTLS-SRTP, always on), and the server forwards it without recording anything. But the server sees the audio packets, so a modified server could listen in.
 - So **whoever controls the server (you, the host) can technically read all messages.** So can anyone who steals the server's disk or a backup. This is normal for self-hosted chat servers (each community trusts its own server), but users deserve to know it.
 - **Passwords** are never stored; only Argon2id hashes are. **Login tokens** are stored only as SHA-256 hashes.
 

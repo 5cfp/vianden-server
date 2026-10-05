@@ -140,6 +140,7 @@ type channelRequest struct {
 	Topic    *string `json:"topic"`
 	ViewRole *string `json:"view_role"`
 	SendRole *string `json:"send_role"`
+	Type     *string `json:"type"` // "text" or "voice": create only
 }
 
 func (req channelRequest) changes() chat.ChannelChanges {
@@ -176,6 +177,9 @@ func handleCreateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 		if ch.SendRole != nil {
 			set.SendRole = *ch.SendRole
 		}
+		if req.Type != nil {
+			set.Type = *req.Type
+		}
 		c, err := svc.CreateChannel(r.Context(), s.User, set)
 		if err != nil {
 			writeServiceError(w, logger, "create channel", err)
@@ -190,7 +194,7 @@ func handleCreateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 	}
 }
 
-func handleUpdateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
+func handleUpdateChannel(svc Chat, rt Realtime, vc Voice, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
@@ -200,6 +204,10 @@ func handleUpdateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 		var req channelRequest
 		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+			return
+		}
+		if req.Type != nil {
+			writeError(w, http.StatusBadRequest, "invalid_type", "a channel's type cannot be changed")
 			return
 		}
 		c, previousView, err := svc.UpdateChannel(r.Context(), s.User, id, req.changes())
@@ -213,13 +221,14 @@ func handleUpdateChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 		rt.BroadcastWhere("channel.deleted", map[string]int64{"id": c.ID}, func(role perm.Role) bool {
 			return role.AtLeast(previousView) && !c.CanView(role)
 		})
+		vc.ChannelChanged(r.Context(), c.ID) // new rules for who may join or speak
 		writeJSON(w, http.StatusOK, struct {
 			Channel channelResponse `json:"channel"`
 		}{toChannelResponse(c)})
 	}
 }
 
-func handleDeleteChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandler {
+func handleDeleteChannel(svc Chat, rt Realtime, vc Voice, logger *slog.Logger) authedHandler {
 	return func(w http.ResponseWriter, r *http.Request, s accounts.Session) {
 		id, ok := pathID(r, "id")
 		if !ok {
@@ -233,6 +242,7 @@ func handleDeleteChannel(svc Chat, rt Realtime, logger *slog.Logger) authedHandl
 		}
 		logger.Info("channel deleted", "channel_id", id, "by_user_id", s.User.ID)
 		rt.BroadcastWhere("channel.deleted", map[string]int64{"id": id}, c.CanView)
+		vc.ChannelDeleted(id)
 		w.Header().Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

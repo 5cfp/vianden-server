@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/5cfp/vianden-server/internal/config"
+	"github.com/5cfp/vianden-server/internal/tcpshare"
 )
 
 var discard = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -42,7 +43,7 @@ func startServe(t *testing.T, cfg config.Config) (stop func() error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, cfg, ok, nil, discard) }()
+	go func() { done <- Serve(ctx, cfg, ok, nil, nil, discard) }()
 	time.Sleep(300 * time.Millisecond) // let it start listening
 	return func() error {
 		cancel()
@@ -185,7 +186,7 @@ func TestPortInUseIsReported(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	err = Serve(context.Background(), config.Config{TLSMode: config.TLSPlain, ListenAddr: ln.Addr().String()}, ok, nil, discard)
+	err = Serve(context.Background(), config.Config{TLSMode: config.TLSPlain, ListenAddr: ln.Addr().String()}, ok, nil, nil, discard)
 	if err == nil {
 		t.Error("expected an error for a port that is already in use")
 	}
@@ -203,4 +204,45 @@ func TestRedirectCannotLeaveOurDomain(t *testing.T) {
 			t.Errorf("path %q redirects to host %q (Location %q)", path, loc.Host, rec.Header().Get("Location"))
 		}
 	}
+}
+
+// The main port is shared with voice's TCP fallback (M7): HTTP still works, and a
+// connection starting with byte 0x00 goes to voice instead.
+func TestMainPortIsSharedWithVoice(t *testing.T) {
+	addr := freePort(t)
+	q := tcpshare.NewQueue(&net.TCPAddr{Port: 443})
+	defer q.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- Serve(ctx, config.Config{TLSMode: config.TLSPlain, ListenAddr: addr}, ok, nil, q, discard)
+	}()
+	time.Sleep(300 * time.Millisecond)
+
+	resp, err := http.Get("http://" + addr + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	c.Write([]byte{0x00, 0x01, 'x'})
+	got := make(chan net.Conn, 1)
+	go func() {
+		if vc, err := q.Accept(); err == nil {
+			got <- vc
+		}
+	}()
+	select {
+	case vc := <-got:
+		vc.Close()
+	case <-time.After(3 * time.Second):
+		t.Error("the voice connection did not reach voice")
+	}
+	cancel()
+	<-done
 }

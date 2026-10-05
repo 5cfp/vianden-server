@@ -44,9 +44,17 @@ services:
       # The database runs on the private Docker network of this machine, so the
       # connection never leaves the host (that is why TLS to it is not needed).
       VIANDEN_DATABASE_URL: postgres://${DB_USER:-vianden}:${DB_PASSWORD}@db:5432/${DB_NAME:-vianden}?sslmode=disable
+      # Voice (M7): one UDP port for all voice audio. The TCP fallback shares HTTPS, whose
+      # PUBLIC port is 443 (Docker maps 443 -> 8443). The public address defaults to the
+      # domain; add your server's LAN IP after a comma so people at home connect directly.
+      VIANDEN_VOICE_UDP_PORT: ${VIANDEN_VOICE_UDP_PORT:-50000}
+      VIANDEN_VOICE_PUBLIC_ADDRESS: ${VIANDEN_VOICE_PUBLIC_ADDRESS:-${VIANDEN_DOMAIN:-}}
+      VIANDEN_VOICE_TCP_PORT: 443
     ports:
       - "443:8443" # HTTPS: the app and its WebSocket
       - "80:8080" # HTTP: Let's Encrypt domain check + redirect to HTTPS
+      # Voice audio (UDP). Same number inside and outside: clients are told this port.
+      - "${VIANDEN_VOICE_UDP_PORT:-50000}:${VIANDEN_VOICE_UDP_PORT:-50000}/udp"
     volumes:
       - serverdata:/data # certificates, uploaded files, avatars
     # Hardening: the container cannot write anywhere except /data, has no Linux

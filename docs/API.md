@@ -103,6 +103,9 @@ Every error response (any 4xx or 5xx status) has this body:
 | `forbidden` | 403 | You are logged in, but not allowed to do this (for example, a member managing invites). |
 | `account_banned` | 403 | Login: the account is banned. The message includes the reason, if one was given. Only returned when the password was correct. |
 | `read_only` | 403 | You can see this channel but your role may not write in it. |
+| `not_a_text_channel` | 400 | A message action on a voice channel (voice channels have no messages). |
+| `not_in_voice` | 404 | That user is not in this voice channel. |
+| `voice_unavailable` | 503 | Voice is turned off or could not start on this server. |
 | `not_found` | 404 | No route matches the method and path. |
 | `username_taken` | 409 | Another account already has this username (comparison ignores case). |
 | `channel_name_taken` | 409 | Another channel already has this name (comparison ignores case). |
@@ -147,6 +150,7 @@ Every user has exactly one role. Roles are ranked: `owner` > `admin` > `moderato
 | `kick_members` | sign a user out on all devices | ✓ | ✓ | ✓ | |
 | `ban_members` | block a user from logging in | ✓ | ✓ | | |
 | `mention_everyone` | `@everyone` pings everyone who can see the channel | ✓ | ✓ | ✓ | |
+| `moderate_voice` | disconnect or server-mute people in voice channels (below your role) | ✓ | ✓ | ✓ | |
 
 **Hierarchy rule:** actions on another user (role change, kick, ban) need the permission **and** a target whose role is strictly below yours. A new role must also be below yours. There is exactly one owner; no one can become owner or act on the owner.
 
@@ -203,7 +207,8 @@ Returns the server's name and versions. Used for the [version handshake](#versio
 {
   "name": "My Vianden Server",
   "version": "0.1.0-dev",
-  "protocol_version": 1
+  "protocol_version": 1,
+  "voice": true
 }
 ```
 
@@ -212,6 +217,7 @@ Returns the server's name and versions. Used for the [version handshake](#versio
 | `name` | string | Server name chosen by the host (at most 64 characters). |
 | `version` | string | Server software version. For display only; do not use it for compatibility checks. |
 | `protocol_version` | integer | API protocol version. Compare this for compatibility. |
+| `voice` | boolean | Whether voice channels work on this server (see [Voice signaling](#6-voice-signaling)). If `false`, show voice channels as unavailable. |
 
 Example:
 ```
@@ -252,7 +258,7 @@ Creates an account and logs it in. Use the owner setup token as `invite_code` fo
     "display_name": "Osama",
     "is_owner": true,
     "role": "owner",
-    "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone"]
+    "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone", "moderate_voice"]
   },
   "token": "vs_3kQ9xZ..."
 }
@@ -330,7 +336,7 @@ Returns the logged-in user. Useful at app start to check whether a stored token 
 ```json
 {
   "user": { "id": 1, "username": "osama", "display_name": "Osama", "is_owner": true,
-            "role": "owner", "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone"],
+            "role": "owner", "permissions": ["manage_channels", "manage_invites", "manage_roles", "delete_messages", "kick_members", "ban_members", "mention_everyone", "moderate_voice"],
             "avatar": null }
 }
 ```
@@ -451,7 +457,7 @@ Managers can only change or delete channels they can see themselves, and cannot 
 | `id` | integer | Channel ID. |
 | `name` | string | Display name, e.g. `General`. |
 | `topic` | string | Short description; may be empty. |
-| `type` | string | Always `text` in this version (`voice` comes later). Clients should ignore channels of types they do not know. |
+| `type` | string | `text` or `voice` (voice-only: no messages; see [Voice signaling](#6-voice-signaling)). Set when the channel is created; never changes. Clients should ignore channels of types they do not know. |
 | `position` | integer | Sort order in the room list, lowest first. |
 | `view_role` | string | Minimum role to see the channel: `owner`, `admin`, `moderator`, or `member`. |
 | `send_role` | string | Minimum role to write in it. Compare with your own role (order: owner > admin > moderator > member) to decide whether to show the message box. |
@@ -500,12 +506,12 @@ Lists all channels in room-list order, each with a preview of its newest message
 - **Errors:** `unauthorized` (401).
 
 ### `POST /api/v1/channels`
-Creates a text channel at the end of the list.
+Creates a text or voice channel at the end of the list.
 
 - **Auth:** session token; permission `manage_channels`
-- **Request body:** `{ "name": "Games", "topic": "Who is online tonight?", "view_role": "member", "send_role": "member" }` (`topic` optional; `view_role` defaults to `member`; `send_role` defaults to `view_role`)
+- **Request body:** `{ "name": "Games", "topic": "Who is online tonight?", "view_role": "member", "send_role": "member" }` (`topic` optional; `view_role` defaults to `member`; `send_role` defaults to `view_role`). Add `"type": "voice"` for a [voice channel](#6-voice-signaling) (default `text`; it cannot be changed later). In a voice channel, `view_role` = who may join and listen, `send_role` = who may speak.
 - **Response `201 Created`:** `{ "channel": <channel object> }`
-- **Errors:** `invalid_request` (400), `invalid_name` (400), `invalid_topic` (400), `unauthorized` (401), `forbidden` (403), `channel_name_taken` (409).
+- **Errors:** `invalid_request` (400), `invalid_name` (400), `invalid_topic` (400), `invalid_type` (400), `unauthorized` (401), `forbidden` (403), `channel_name_taken` (409).
 - Also sent to every connected client as a [`channel.created`](#channelcreated-channelupdated-channeldeleted) event.
 
 ### `PATCH /api/v1/channels/{id}`
@@ -804,7 +810,85 @@ Unknown or malformed client messages are ignored.
 ---
 
 ## 6. Voice signaling
-> Not available yet: arrives in milestone M7.
+
+Voice channels (`type: "voice"`) carry live audio, nothing else (no messages). The server is an **audio-only SFU**: each client opens **one WebRTC connection** to the server, sends its own microphone once, and receives the other people's audio as separate tracks. The server forwards packets without decoding or mixing them.
+
+- **Codec:** Opus, 48 kHz (the WebRTC default). The server offers nothing else.
+- **Encryption:** always on (WebRTC's DTLS-SRTP). The keys are agreed inside the signaling below, which runs over the TLS WebSocket. Note: this is client-to-server encryption, like everything else; the server could technically listen in (see "Security" in HOSTING.md).
+- **Network:** the server's addresses come as ICE candidates: one **UDP port** (default 50000), and a **TCP** fallback on the server's main port (443) for networks that block UDP. Clients need no STUN or TURN servers: use an empty ICE server list.
+- **Who may do what:** you may **join and listen** in a voice channel you can see (`view_role`), and **speak** if your role reaches its `send_role`. Audio of people who may not speak, or who are server-muted, is **dropped by the server**. Joining a voice channel you cannot see answers `voice.error` `not_found`.
+- **One voice channel per account:** joining another channel (or joining from another device) ends the previous session.
+- `GET /api/v1/info` has `"voice": true` when voice works on the server.
+
+### Joining: the message flow
+All signaling messages go over the [WebSocket](#5-websocket) in the usual `{"type": ..., "data": ...}` form. **The server always makes the offers; the client only answers.** It sends a new offer whenever someone joins or leaves the channel (their audio track is added or removed).
+
+```
+client                                   server
+  | voice.join {channel_id}  ------------->  |  checks access
+  |  <------------  voice.joined {channel_id, can_speak}
+  |  <------------  voice.offer {sdp}        |  (one audio m-line for your microphone,
+  |                                          |   plus one per person already speaking)
+  | setRemoteDescription(offer)              |
+  | addTrack(microphone)  (if can_speak)     |
+  | createAnswer + setLocalDescription       |
+  | voice.answer {sdp}  ------------------>  |
+  | voice.candidate {...}  <------------->   |  both directions, any time ("trickle ICE")
+  |  ...audio flows...                       |
+  |  <------------  voice.offer {sdp}        |  someone joined or left: answer it again
+  | voice.leave {}  ---------------------->  |
+```
+
+**Important for clients:** create the peer connection and add the microphone track (if `can_speak`) **before** applying the first offer, or attach it to the first audio transceiver right after `setRemoteDescription`. Each incoming track's **stream id is `user-<id>`**, so you know whose voice it is (e.g. for per-person volume). Remote audio should play automatically.
+
+### Client → server
+| Type | Data | Meaning |
+|---|---|---|
+| `voice.join` | `{ "channel_id": 7 }` | Join (or switch to) a voice channel. |
+| `voice.leave` | `{}` | Leave voice. Closing the WebSocket also leaves. |
+| `voice.answer` | `{ "sdp": "v=0..." }` | Your answer to the latest `voice.offer` (at most 24 KiB). |
+| `voice.candidate` | `{ "candidate": { "candidate": "candidate:...", "sdpMid": "0", "sdpMLineIndex": 0 } }` | One of your ICE candidates (the browser/WebRTC `RTCIceCandidateInit` shape). |
+| `voice.self` | `{ "muted": true, "deafened": false }` | Your own mute and deafen state, shown to others. Muting itself happens on your device (disable the microphone track); deafening = stop playing the others. |
+| `voice.speaking` | `{ "speaking": true }` | Your microphone level crossed your "speaking" threshold (or fell below it). Send only on changes. Ignored while you are muted, server-muted, or may not speak; forwarded at most every 150 ms. |
+
+### Server → client
+| Type | Sent to | Data |
+|---|---|---|
+| `voice.joined` | you | `{ "channel_id": 7, "can_speak": true }`. Sent again with a new `can_speak` if your role or the channel's rules change while you are in it. |
+| `voice.offer` | you | `{ "sdp": "..." }`: answer with `voice.answer`. |
+| `voice.candidate` | you | `{ "candidate": { "candidate": "...", "sdpMid": "0", "sdpMLineIndex": 0 } }` |
+| `voice.left` | you | `{ "channel_id": 7, "reason": "..." }`: your session ended. Reasons: `left`, `disconnected` (by a moderator), `joined_elsewhere` (you joined another channel or from another device), `connection_lost`, `no_access` (you can no longer see the channel), `channel_deleted`, `server_stopping`. |
+| `voice.error` | you | `{ "code": "...", "message": "..." }`: `not_found` (no such voice channel for you), `voice_unavailable`, `channel_full` (25 people). |
+| `voice.state` | everyone who can see the channel | A [voice channel state](#voice-channel-state): who is in it now. Sent on every change; an empty `participants` list means the channel is empty. |
+| `voice.speaking` | the people in the channel | `{ "channel_id": 7, "user_id": 2, "speaking": true }` |
+
+#### Voice channel state
+```json
+{ "channel_id": 7, "participants": [
+    { "user": { "id": 2, "username": "sara", "display_name": "Sara" },
+      "muted": false, "deafened": false, "server_muted": false, "can_speak": true } ] }
+```
+`muted`/`deafened`: the person's own choice. `server_muted`: a moderator muted them (their audio is not forwarded). `can_speak`: their role may speak in this channel. Participants are listed in joining order.
+
+### `GET /api/v1/voice`
+Who is in which voice channel right now (call it after connecting, then follow `voice.state` events).
+
+- **Auth:** session token.
+- **Response `200 OK`:** `{ "available": true, "channels": [ <voice channel state>, ... ] }`: only non-empty channels you can see.
+
+### `POST /api/v1/channels/{id}/voice/{user_id}/disconnect`
+Removes someone from a voice channel (they can join again; for more, use kick or ban).
+
+- **Auth:** session token; permission `moderate_voice`, and the person must be **below your role**.
+- **Response `204 No Content`.** They receive `voice.left` with reason `disconnected`; everyone sees the new `voice.state`.
+- **Errors:** `unauthorized` (401), `forbidden` (403), `not_found` (404: channel), `not_in_voice` (404), `voice_unavailable` (503).
+
+### `PUT /api/v1/channels/{id}/voice/{user_id}/mute`
+Server-mutes or unmutes someone: **the server stops forwarding their audio**, whatever their app does. It lasts until unmuted or until they leave the channel.
+
+- **Auth, errors:** as for disconnect.
+- **Request body:** `{ "muted": true }`
+- **Response `204 No Content`.** Everyone sees the new `voice.state` (`server_muted`).
 
 ---
 
@@ -824,7 +908,7 @@ Unknown or malformed client messages are ignored.
 | `POST /channels/{id}/messages` and `PATCH /channels/{id}/messages/{mid}` (shared) | 10 messages at once, then 1 more per second, **per user** |
 | `POST /attachments` | 10 at once, then 1 more every 2 seconds, **per user**; at most 20 uploads waiting to be sent |
 | `PATCH /me`, `PUT`/`DELETE /me/avatar` (shared) | 5 at once, then 1 more every 6 seconds, **per user** |
-| `GET /ws` | at most 10 open connections per account; client messages at most 4096 bytes and 10 per second (bursts of 20); `typing` forwarded at most every 2 s per channel and 1 s overall |
+| `GET /ws` | at most 10 open connections per account; client messages at most 32 KiB and 20 per second (bursts of 60); `typing` forwarded at most every 2 s per channel and 1 s overall |
 
 Over the limit the server answers `429 rate_limited` with a `Retry-After` header (seconds). Refused requests do not count against the limit.
 
@@ -851,3 +935,4 @@ Over the limit the server answers `429 rate_limited` with a `Retry-After` header
 - Added mentions (`mentions`, `mentions_everyone` in message objects; permission `mention_everyone`; the usernames `everyone` and `here` are reserved) and unread tracking (`last_read_id`, `unread_count`, `mention_count` in `GET /channels`; `PUT /api/v1/channels/{id}/read`; WebSocket event `channel.read`). A reply now pings the author of the original.
 - Added attachments: `POST /api/v1/attachments`, `GET /api/v1/attachments/{id}`, `attachments` in the send request and in message objects, errors `invalid_attachments`, `invalid_filename`, `invalid_file`, `file_too_large`, `too_many_uploads`. A message with attachments may have empty `content`.
 - Added profiles: `PATCH /api/v1/me` (display name), `PUT`/`DELETE /api/v1/me/avatar`, `GET /api/v1/avatars/{key}`, `avatar` in user and member objects; `member.updated` is now also sent when a display name or avatar changes. New error `invalid_avatar`.
+- Added voice channels: `type: "voice"` (create only; `invalid_type` when changing it), [voice signaling](#6-voice-signaling) over the WebSocket (`voice.join`, `voice.leave`, `voice.answer`, `voice.candidate`, `voice.self`, `voice.speaking`; `voice.joined`, `voice.offer`, `voice.candidate`, `voice.left`, `voice.error`, `voice.state`, `voice.speaking`), `GET /api/v1/voice`, voice moderation (`POST .../voice/{user_id}/disconnect`, `PUT .../voice/{user_id}/mute`, permission `moderate_voice`), `voice` in `GET /api/v1/info`. Message endpoints answer `not_a_text_channel` for voice channels. WebSocket client messages may now be up to 32 KiB, 20 per second (bursts of 60).

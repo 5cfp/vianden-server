@@ -19,14 +19,17 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 
 	"github.com/5cfp/vianden-server/internal/config"
+	"github.com/5cfp/vianden-server/internal/tcpshare"
 )
 
 // Serve runs the listeners until ctx is cancelled, then shuts them down gracefully.
 // onShutdown runs when shutdown starts (used to close WebSocket connections).
-func Serve(ctx context.Context, cfg config.Config, handler http.Handler, onShutdown func(), logger *slog.Logger) error {
+// iceTCP (may be nil): voice's TCP fallback connections on the main port are handed to
+// it (see package tcpshare).
+func Serve(ctx context.Context, cfg config.Config, handler http.Handler, onShutdown func(), iceTCP *tcpshare.Queue, logger *slog.Logger) error {
 	switch cfg.TLSMode {
 	case config.TLSAutocert:
-		return serveAutocert(ctx, cfg, handler, onShutdown, logger)
+		return serveAutocert(ctx, cfg, handler, onShutdown, iceTCP, logger)
 	case config.TLSSelfSigned:
 		cert, err := loadOrCreateSelfSigned(cfg, logger)
 		if err != nil {
@@ -34,13 +37,13 @@ func Serve(ctx context.Context, cfg config.Config, handler http.Handler, onShutd
 		}
 		tlsCfg := baseTLSConfig()
 		tlsCfg.Certificates = []tls.Certificate{cert}
-		return run(ctx, onShutdown, newServer(cfg.HTTPSAddr, handler, tlsCfg))
+		return run(ctx, onShutdown, iceTCP, newServer(cfg.HTTPSAddr, handler, tlsCfg))
 	default:
-		return run(ctx, onShutdown, newServer(cfg.ListenAddr, handler, nil))
+		return run(ctx, onShutdown, iceTCP, newServer(cfg.ListenAddr, handler, nil))
 	}
 }
 
-func serveAutocert(ctx context.Context, cfg config.Config, handler http.Handler, onShutdown func(), logger *slog.Logger) error {
+func serveAutocert(ctx context.Context, cfg config.Config, handler http.Handler, onShutdown func(), iceTCP *tcpshare.Queue, logger *slog.Logger) error {
 	m := &autocert.Manager{
 		Prompt: autocert.AcceptTOS, // accepts Let's Encrypt's terms of service
 		// Only ever request a certificate for OUR domain. Without this, anyone could point
@@ -63,7 +66,7 @@ func serveAutocert(ctx context.Context, cfg config.Config, handler http.Handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	return run(ctx, onShutdown, newServer(cfg.HTTPSAddr, hsts(handler), tlsCfg), httpSrv)
+	return run(ctx, onShutdown, iceTCP, newServer(cfg.HTTPSAddr, hsts(handler), tlsCfg), httpSrv)
 }
 
 // baseTLSConfig: TLS 1.2 or newer only. Go's default cipher choices are already safe.
@@ -93,13 +96,17 @@ func newServer(addr string, handler http.Handler, tlsCfg *tls.Config) *http.Serv
 }
 
 // run starts every server, waits until ctx is cancelled or one of them fails, then shuts all down.
-func run(ctx context.Context, onShutdown func(), servers ...*http.Server) error {
+// The first server is the main one: if iceTCP is set, its port is shared with voice.
+func run(ctx context.Context, onShutdown func(), iceTCP *tcpshare.Queue, servers ...*http.Server) error {
 	errCh := make(chan error, len(servers))
-	for _, srv := range servers {
+	for i, srv := range servers {
 		ln, err := net.Listen("tcp", srv.Addr)
 		if err != nil {
 			shutdownAll(servers)
 			return err // e.g. port already in use, or no permission for ports below 1024
+		}
+		if i == 0 && iceTCP != nil {
+			ln = tcpshare.Split(ln, iceTCP)
 		}
 		go func() {
 			if srv.TLSConfig != nil {

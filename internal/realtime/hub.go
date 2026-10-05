@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,16 +29,17 @@ import (
 // Limits and timings (also documented in docs/API.md).
 const (
 	maxConnectionsPerUser = 10               // stops one account from opening thousands of sockets
-	maxIncomingBytes      = 4096             // client messages are tiny (only "typing" for now)
+	maxIncomingBytes      = 32 << 10         // client messages are small; voice answers (SDP) are the biggest
 	sendQueueSize         = 64               // events waiting for one slow client
 	pingInterval          = 30 * time.Second // keeps the connection alive and detects dead ones
 	writeTimeout          = 10 * time.Second
 	typingThrottle        = 2 * time.Second // one typing event per user and channel at most this often
 	typingThrottleAny     = time.Second     // and at most one per connection per second, across all channels
-	// Client messages per connection: 10 per second on average, bursts of 20. More than
-	// that is not a normal app, so the connection is closed (policy violation, 1008).
-	incomingPerSecond = 10
-	incomingBurst     = 20
+	// Client messages per connection: 20 per second on average, bursts of 60 (joining voice
+	// sends a quick burst of network candidates). More than that is not a normal app, so
+	// the connection is closed (policy violation, 1008).
+	incomingPerSecond = 20
+	incomingBurst     = 60
 )
 
 // Custom close codes (4000-4999 are free for applications).
@@ -74,6 +76,8 @@ type Hub struct {
 	closed  bool                  // true after CloseAll: no new connections
 
 	channelAccess ChannelAccessFunc // nil = no channel checks (tests)
+	voice         VoiceHandler      // nil = voice messages are ignored
+	nextID        int64
 }
 
 type onlineUser struct {
@@ -82,6 +86,7 @@ type onlineUser struct {
 }
 
 type client struct {
+	id        int64 // unique per connection (voice sessions belong to one connection)
 	user      accounts.User
 	sessionID int64
 	conn      *websocket.Conn
@@ -127,7 +132,13 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, s accounts.Session) 
 	}
 
 	h.register(c)
-	defer h.unregister(c)
+	defer func() {
+		h.unregister(c)
+		// Outside the lock: voice may send events to other connections while cleaning up.
+		if v := h.voiceHandler(); v != nil {
+			h.safeVoice(c, func() { v.PeerGone(peer{h, c}) })
+		}
+	}()
 	h.logger.Info("websocket connected", "user_id", s.User.ID)
 
 	// Note: cancelling a context given to conn.Read would drop the connection WITHOUT a close
@@ -158,6 +169,8 @@ func (h *Hub) register(c *client) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	h.nextID++
+	c.id = h.nextID
 	h.clients[c] = struct{}{}
 	u := h.online[c.user.ID]
 	cameOnline := u == nil
@@ -283,13 +296,11 @@ func (h *Hub) writeLoop(ctx context.Context, c *client) {
 	}
 }
 
-// incoming is a message from the client. Only "typing" exists for now; others are ignored,
+// incoming is a message from the client: "typing", or "voice.*" (M7). Others are ignored,
 // so newer clients can talk to this server without breaking it.
 type incoming struct {
-	Type string `json:"type"`
-	Data struct {
-		ChannelID int64 `json:"channel_id"`
-	} `json:"data"`
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data"`
 }
 
 func (h *Hub) readLoop(c *client) {
@@ -315,8 +326,18 @@ func (h *Hub) readLoop(c *client) {
 		if json.Unmarshal(data, &in) != nil {
 			continue // not JSON: ignore
 		}
-		if in.Type == "typing" && in.Data.ChannelID > 0 {
-			h.handleTyping(c, in.Data.ChannelID)
+		switch {
+		case in.Type == "typing":
+			var d struct {
+				ChannelID int64 `json:"channel_id"`
+			}
+			if json.Unmarshal(in.Data, &d) == nil && d.ChannelID > 0 {
+				h.handleTyping(c, d.ChannelID)
+			}
+		case strings.HasPrefix(in.Type, "voice."):
+			if v := h.voiceHandler(); v != nil {
+				h.safeVoice(c, func() { v.HandleVoice(peer{h, c}, in.Type, in.Data) })
+			}
 		}
 	}
 }
@@ -448,4 +469,69 @@ func (h *Hub) UpdateUserProfile(userID int64, displayName string) {
 	if o := h.online[userID]; o != nil {
 		o.info.DisplayName = displayName
 	}
+}
+
+// ---- voice (M7) ----
+
+// Peer is one WebSocket connection, as the voice service sees it. A voice session belongs
+// to exactly one connection: when it closes, the session ends.
+type Peer interface {
+	ConnID() int64
+	User() accounts.User // current: the role can change while connected
+	// Send queues an event for this connection only; false if it is already gone.
+	Send(eventType string, data any) bool
+}
+
+// VoiceHandler receives the "voice.*" messages of every connection, and is told when a
+// connection closes. The voice service implements it.
+type VoiceHandler interface {
+	HandleVoice(p Peer, eventType string, data json.RawMessage)
+	PeerGone(p Peer)
+}
+
+// SetVoice connects the voice service (nil: voice messages are ignored).
+func (h *Hub) SetVoice(v VoiceHandler) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.voice = v
+}
+
+func (h *Hub) voiceHandler() VoiceHandler {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.voice
+}
+
+// safeVoice runs a call into the voice service. A panic in voice is logged and the
+// connection stays open: voice failing must not break text chat.
+func (h *Hub) safeVoice(c *client, call func()) {
+	defer func() {
+		if v := recover(); v != nil {
+			h.logger.Error("panic in voice", "user_id", c.user.ID, "panic", v, "stack", string(debug.Stack()))
+		}
+	}()
+	call()
+}
+
+type peer struct {
+	h *Hub
+	c *client
+}
+
+func (p peer) ConnID() int64 { return p.c.id }
+
+func (p peer) User() accounts.User {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	return p.c.user
+}
+
+func (p peer) Send(eventType string, data any) bool {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	if _, ok := p.h.clients[p.c]; !ok || p.c.closing {
+		return false
+	}
+	p.h.enqueue(p.c, mustJSON(Event{eventType, data}))
+	return true
 }

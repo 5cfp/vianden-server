@@ -68,6 +68,7 @@ type Deps struct {
 	Files      Files    // uploads (nil: upload routes are not registered, e.g. in tests)
 	Profiles   Profiles // change your display name (nil: not registered)
 	Avatars    Avatars  // avatar pictures (nil: not registered)
+	Voice      Voice    // voice channels (nil: this server has no voice)
 	Realtime   Realtime
 	Logger     *slog.Logger
 }
@@ -77,9 +78,13 @@ func NewHandler(d Deps) http.Handler {
 	if d.Realtime == nil {
 		d.Realtime = noRealtime{}
 	}
+	if d.Voice == nil {
+		d.Voice = noVoice{}
+	}
+	d.Realtime = withVoice{d.Realtime, d.Voice}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v1/health", handleHealth(d.DB, d.Logger))
-	mux.HandleFunc("GET /api/v1/info", handleInfo(d.ServerName))
+	mux.HandleFunc("GET /api/v1/info", handleInfo(d.ServerName, d.Voice))
 
 	// Login and register share one limit per client: 10 attempts, then 1 more every 6 seconds.
 	authLimit := newIPRateLimiter(10, 10)
@@ -96,8 +101,8 @@ func NewHandler(d Deps) http.Handler {
 	// Channels and messages (any logged-in user; managing channels: owner only, checked in the service).
 	mux.HandleFunc("GET /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleListChannels(d.Chat, d.Logger)))
 	mux.HandleFunc("POST /api/v1/channels", requireAuth(d.Accounts, d.Logger, handleCreateChannel(d.Chat, d.Realtime, d.Logger)))
-	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Realtime, d.Logger)))
-	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Realtime, d.Logger)))
+	mux.HandleFunc("PATCH /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleUpdateChannel(d.Chat, d.Realtime, d.Voice, d.Logger)))
+	mux.HandleFunc("DELETE /api/v1/channels/{id}", requireAuth(d.Accounts, d.Logger, handleDeleteChannel(d.Chat, d.Realtime, d.Voice, d.Logger)))
 	mux.HandleFunc("GET /api/v1/channels/{id}/messages", requireAuth(d.Accounts, d.Logger, handleListMessages(d.Chat, d.Logger)))
 	// Sending and editing: 10 messages at once, then 1 per second, per user (stops spam and runaway clients).
 	sendLimit := newIPRateLimiter(60, 10)
@@ -106,6 +111,11 @@ func NewHandler(d Deps) http.Handler {
 	mux.HandleFunc("PATCH /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, sendLimit.limitUser(handleEditMessage(d.Chat, d.Realtime, d.Logger))))
 	mux.HandleFunc("DELETE /api/v1/channels/{id}/messages/{mid}", requireAuth(d.Accounts, d.Logger, handleDeleteMessage(d.Chat, d.Realtime, d.Logger)))
 	mux.HandleFunc("PUT /api/v1/channels/{id}/read", requireAuth(d.Accounts, d.Logger, handleMarkRead(d.Chat, d.Realtime, d.Logger)))
+
+	// Voice (M7): who is in which voice channel; moderators disconnect or server-mute.
+	mux.HandleFunc("GET /api/v1/voice", requireAuth(d.Accounts, d.Logger, handleListVoice(d.Voice)))
+	mux.HandleFunc("POST /api/v1/channels/{id}/voice/{uid}/disconnect", requireAuth(d.Accounts, d.Logger, handleVoiceDisconnect(d.Chat, d.Voice, d.Logger)))
+	mux.HandleFunc("PUT /api/v1/channels/{id}/voice/{uid}/mute", requireAuth(d.Accounts, d.Logger, handleVoiceMute(d.Chat, d.Voice, d.Logger)))
 
 	// Your profile (M6): display name and avatar. At most 10 changes a minute per user.
 	profileLimit := newIPRateLimiter(10, 5)
@@ -166,14 +176,16 @@ type infoResponse struct {
 	Name            string `json:"name"`
 	Version         string `json:"version"`
 	ProtocolVersion int    `json:"protocol_version"`
+	Voice           bool   `json:"voice"` // voice channels work on this server (M7)
 }
 
-func handleInfo(serverName string) http.HandlerFunc {
+func handleInfo(serverName string, v Voice) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, infoResponse{
 			Name:            serverName,
 			Version:         buildinfo.Version,
 			ProtocolVersion: buildinfo.ProtocolVersion,
+			Voice:           v.Available(),
 		})
 	}
 }

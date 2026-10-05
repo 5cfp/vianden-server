@@ -34,12 +34,20 @@ const (
 	previewLength         = 100 // characters of the last message shown in the room list
 )
 
+// Channel types.
+const (
+	TypeText  = "text"
+	TypeVoice = "voice"
+)
+
 var (
 	ErrChannelNotFound  = errors.New("channel not found")
 	ErrChannelNameTaken = errors.New("a channel with this name already exists")
 	ErrMessageNotFound  = errors.New("message not found")
 	// ErrReadOnly: the user can see the channel but not write in it.
 	ErrReadOnly = errors.New("you cannot write in this channel")
+	// ErrNotTextChannel: messages were requested from a voice channel (it has none).
+	ErrNotTextChannel = errors.New("this is a voice channel: it has no messages")
 )
 
 // Channel is a text channel, with a preview of its newest message (nil if it has none).
@@ -114,6 +122,8 @@ type ChannelSettings struct {
 	Topic    string
 	ViewRole perm.Role // "" = member
 	SendRole perm.Role // "" = member
+	// Type: "text" (default) or "voice". Only used when creating: it never changes.
+	Type string
 }
 
 // ChannelChanges: nil fields keep their current value.
@@ -177,7 +187,7 @@ func (s *Service) ListChannels(ctx context.Context, viewer accounts.User) ([]Cha
 // MarkRead records that the user has read the channel up to messageID (the marker only
 // moves forward). Returns the new marker, for the user's other devices.
 func (s *Service) MarkRead(ctx context.Context, by accounts.User, channelID, messageID int64) (int64, error) {
-	if _, err := s.Channel(ctx, by, channelID); err != nil {
+	if _, err := s.textChannel(ctx, by, channelID); err != nil {
 		return 0, err
 	}
 	return s.queries.MarkRead(ctx, db.MarkReadParams{UserID: by.ID, ChannelID: channelID, MessageID: messageID})
@@ -200,6 +210,25 @@ func (s *Service) Channel(ctx context.Context, viewer accounts.User, id int64) (
 }
 
 // ChannelAccess returns a channel's view and send roles, for the live hub (no user context).
+// textChannel is Channel, for things only text channels have (messages, read markers).
+func (s *Service) textChannel(ctx context.Context, viewer accounts.User, id int64) (Channel, error) {
+	c, err := s.Channel(ctx, viewer, id)
+	if err == nil && c.Type != TypeText {
+		return Channel{}, ErrNotTextChannel
+	}
+	return c, err
+}
+
+// ChannelInfo returns a channel's access roles and type, without a viewer (for the voice
+// service, which checks the roles itself). ok=false if it does not exist.
+func (s *Service) ChannelInfo(ctx context.Context, id int64) (c Channel, ok bool) {
+	row, err := s.queries.GetChannel(ctx, id)
+	if err != nil {
+		return Channel{}, false
+	}
+	return toChannel(row), true
+}
+
 func (s *Service) ChannelAccess(ctx context.Context, id int64) (view, send perm.Role, ok bool) {
 	c, err := s.queries.GetChannel(ctx, id)
 	if err != nil {
@@ -208,7 +237,7 @@ func (s *Service) ChannelAccess(ctx context.Context, id int64) (view, send perm.
 	return perm.Role(c.ViewRole), perm.Role(c.SendRole), true
 }
 
-// CreateChannel adds a text channel at the end of the list.
+// CreateChannel adds a text or voice channel at the end of the list.
 func (s *Service) CreateChannel(ctx context.Context, by accounts.User, set ChannelSettings) (Channel, error) {
 	if !by.Role.Has(perm.ManageChannels) {
 		return Channel{}, accounts.ErrForbidden
@@ -218,7 +247,7 @@ func (s *Service) CreateChannel(ctx context.Context, by accounts.User, set Chann
 		return Channel{}, err
 	}
 	c, err := s.queries.CreateChannel(ctx, db.CreateChannelParams{
-		Name: set.Name, Topic: set.Topic, ViewRole: string(set.ViewRole), SendRole: string(set.SendRole),
+		Name: set.Name, Topic: set.Topic, ViewRole: string(set.ViewRole), SendRole: string(set.SendRole), Type: set.Type,
 	})
 	if err != nil {
 		return Channel{}, mapChannelError(err)
@@ -304,7 +333,7 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 	if err != nil {
 		return Message{}, Channel{}, err
 	}
-	c, err := s.Channel(ctx, by, channelID)
+	c, err := s.textChannel(ctx, by, channelID)
 	if err != nil {
 		return Message{}, Channel{}, err
 	}
@@ -371,7 +400,7 @@ func (s *Service) SendMessage(ctx context.Context, by accounts.User, channelID i
 // someone else's words, not even the owner). Like sending, it needs write access to the
 // channel. Returns the updated message and its channel (for the live event).
 func (s *Service) EditMessage(ctx context.Context, by accounts.User, channelID, messageID int64, content string) (Message, Channel, error) {
-	c, err := s.Channel(ctx, by, channelID)
+	c, err := s.textChannel(ctx, by, channelID)
 	if err != nil {
 		return Message{}, Channel{}, err
 	}
@@ -471,7 +500,7 @@ func (s *Service) ListMessages(ctx context.Context, viewer accounts.User, channe
 	}
 	limit = min(limit, MaxPageSize)
 
-	if _, err := s.Channel(ctx, viewer, channelID); err != nil {
+	if _, err := s.textChannel(ctx, viewer, channelID); err != nil {
 		return nil, false, err
 	}
 
@@ -522,6 +551,13 @@ func cleanSettings(by accounts.User, set ChannelSettings) (ChannelSettings, erro
 		return ChannelSettings{}, err
 	}
 	set.Name, set.Topic = name, topic
+	switch set.Type {
+	case "":
+		set.Type = TypeText
+	case TypeText, TypeVoice:
+	default:
+		return ChannelSettings{}, &accounts.ValidationError{Field: "type", Message: "must be text or voice"}
+	}
 	if set.ViewRole == "" {
 		set.ViewRole = perm.Member
 	}
@@ -630,7 +666,7 @@ func truncate(s string, maxRunes int) string {
 // removed by someone with the permission.
 // Returns the channel, so the caller can tell exactly the users who can see it.
 func (s *Service) DeleteMessage(ctx context.Context, by accounts.User, channelID, messageID int64) (Channel, error) {
-	c, err := s.Channel(ctx, by, channelID) // only in channels you can see
+	c, err := s.textChannel(ctx, by, channelID) // only in channels you can see
 	if err != nil {
 		return Channel{}, err
 	}

@@ -108,6 +108,8 @@ func writeServiceError(w http.ResponseWriter, logger *slog.Logger, action string
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
 	case errors.Is(err, chat.ErrMessageNotFound):
 		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, chat.ErrNotTextChannel):
+		writeError(w, http.StatusBadRequest, "not_a_text_channel", err.Error())
 	case errors.Is(err, chat.ErrReadOnly):
 		writeError(w, http.StatusForbidden, "read_only", err.Error())
 	case errors.Is(err, chat.ErrChannelNameTaken):

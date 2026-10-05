@@ -51,7 +51,7 @@ ENV VIANDEN_DATA_DIR=/data \
     VIANDEN_HTTP_ADDR=:8080
 
 VOLUME ["/data"]
-EXPOSE 8080 8443
+EXPOSE 8080 8443 50000/udp
 
 # Docker marks the container unhealthy if the server stops answering.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
